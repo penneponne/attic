@@ -8,6 +8,8 @@
 use crate::tokens::FeatureIndex;
 
 use super::accumulator::PairSum;
+use super::pair_i8::{cube_totals, scaled_totals};
+use super::pair_table::{Cells, ROW};
 use super::{PAIR, PAIR_ROWS, PairTable, SymNetwork, TOKENS};
 
 /// The row of the pair `{a, b}` in the pair table.
@@ -31,9 +33,6 @@ pub(super) fn pair_row(a: FeatureIndex, b: FeatureIndex) -> usize {
 
 /// The group of channels the AVX2 path adds at once: a register of `f32`.
 const LANES: usize = 8;
-
-/// Halves in one row of the table: both frames' channels.
-const ROW: usize = 2 * PAIR;
 
 const _: () = assert!(
     PAIR.is_multiple_of(LANES),
@@ -91,6 +90,17 @@ pub(super) fn touch_pairs(
 /// in the order [`touch_pairs`] gives.
 #[inline]
 fn row_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) -> [f32; ROW] {
+    match table.cells() {
+        Cells::Halves(_) => half_totals(table, token, others),
+        // The two byte tables add their rows in the same order; see `pair_i8.rs`.
+        Cells::Cubes { q, scale } => cube_totals(q, scale, token, others),
+        Cells::Scaled { q } => scaled_totals(q, token, others),
+    }
+}
+
+/// [`row_totals`] for the table as the file has it, halves.
+#[inline]
+fn half_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) -> [f32; ROW] {
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
