@@ -13,6 +13,8 @@ mod exported;
 mod fixtures;
 mod format;
 mod forward;
+#[cfg(feature = "sym_hm")]
+mod hm;
 #[cfg(feature = "sym_token")]
 mod moment_field;
 #[cfg(feature = "sym_token")]

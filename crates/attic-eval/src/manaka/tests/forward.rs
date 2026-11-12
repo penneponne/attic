@@ -17,12 +17,12 @@ use crate::active_features;
 /// How far a pair sum built by deltas may be from one built from scratch, as a
 /// fraction of its size (or of one, for a sum smaller than that). A game of 160
 /// plies adds and takes out a few thousand rows of it.
-const PAIR_DRIFT: f32 = 2e-5;
+pub(super) const PAIR_DRIFT: f32 = 2e-5;
 
 /// The same for the second moment and the square field. Those sums are in the
 /// tens, and are carried in `f64` and rounded to `f32` once, so what separates a
 /// derived sum from a rebuilt one is that one rounding and not the games.
-const SUM_DRIFT: f32 = 2e-5;
+pub(super) const SUM_DRIFT: f32 = 2e-5;
 
 /// The value is finite and within the reach of its weights, on a position with
 /// hands and promoted pieces as well as the opening. There is no `tanh`: the value

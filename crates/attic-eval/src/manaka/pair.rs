@@ -184,15 +184,83 @@ pub(super) fn touch_pairs(
     }
     let totals = row_totals(&net.pair, token, others);
     for (frame, sum) in sums.iter_mut().enumerate() {
-        let sum: &mut [PairSum; PAIR] = sum
-            .as_mut_slice()
-            .try_into()
-            .expect("a pair sum is PAIR long");
-        for (s, total) in sum
-            .iter_mut()
-            .zip(&totals[frame * PAIR..(frame + 1) * PAIR])
-        {
-            *s += sign * PairSum::from(*total);
+        add_frame(sum, &totals, frame, sign);
+    }
+}
+
+/// `totals`' channels for `frame` (`0` black, `1` white) into that frame's pair sum.
+#[inline]
+fn add_frame(sum: &mut [PairSum], totals: &[f32; ROW], frame: usize, sign: PairSum) {
+    let sum: &mut [PairSum; PAIR] = sum.try_into().expect("a pair sum is PAIR long");
+    for (s, total) in sum
+        .iter_mut()
+        .zip(&totals[frame * PAIR..(frame + 1) * PAIR])
+    {
+        *s += sign * PairSum::from(*total);
+    }
+}
+
+/// [`touch_pairs`] for a position read with `hm`: each frame's tokens are first reflected, or not, by that
+/// frame's own fold (`folded[0]` black's, `folded[1]` white's), and the pair sums are those of the
+/// reflected tokens. Only the frames `update` names are written.
+///
+/// `token` and `others` are numbered as the black frame numbers them and unreflected, as in
+/// [`touch_pairs`]. A row of the table holds a pair's black channels and then the white channels of the
+/// same two pieces. Reflecting a frame's tokens (`mirror_row`) commutes with turning them to the other
+/// frame (`other_frame`), so the black frame's reflected pair `{m(a), m(b)}` is read in the black half of
+/// row `{m(a), m(b)}`, and the white frame's reflected pair, in the white half of the row `{m(a), m(b)}`
+/// again. The white half of that row is `T(other m(a), other m(b))`, which is the pair the white frame
+/// reads once it has reflected its own tokens (`m(other(a)) = other(m(a))`).
+///
+/// Both frames folded alike, and both updated, take one read, as the unfolded path does, with `token` and
+/// `others` reflected together. Otherwise each frame updated takes a read of its own, of which only its
+/// half is used. The sums are accumulated in the order [`touch_pairs`] gives, so a position none of whose
+/// frames fold is the same bits it always was.
+#[inline]
+pub(super) fn touch_pairs_hm(
+    sums: &mut [Vec<PairSum>; 2],
+    net: &SymNetwork,
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    sign: PairSum,
+    folded: [bool; 2],
+    update: [bool; 2],
+) {
+    use crate::tokens::{MAX_ACTIVE_FEATURES, mirror_row};
+
+    if PAIR == 0 || !(update[0] || update[1]) {
+        return;
+    }
+    let mut buffer = [0 as FeatureIndex; MAX_ACTIVE_FEATURES];
+    // `others` reflected into `buffer`, and how many there are.
+    fn reflect_into(
+        others: &[FeatureIndex],
+        buffer: &mut [FeatureIndex; MAX_ACTIVE_FEATURES],
+    ) -> usize {
+        for (slot, &other) in buffer.iter_mut().zip(others) {
+            *slot = mirror_row(other);
+        }
+        others.len()
+    }
+    match (folded, update) {
+        ([false, false], [true, true]) => touch_pairs(sums, net, token, others, sign),
+        ([true, true], [true, true]) => {
+            let count = reflect_into(others, &mut buffer);
+            touch_pairs(sums, net, mirror_row(token), &buffer[..count], sign);
+        }
+        _ => {
+            for frame in 0..2 {
+                if !update[frame] {
+                    continue;
+                }
+                let totals = if folded[frame] {
+                    let count = reflect_into(others, &mut buffer);
+                    row_totals(&net.pair, mirror_row(token), &buffer[..count])
+                } else {
+                    row_totals(&net.pair, token, others)
+                };
+                add_frame(&mut sums[frame], &totals, frame, sign);
+            }
         }
     }
 }

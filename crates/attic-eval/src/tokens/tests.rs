@@ -383,3 +383,120 @@ fn the_white_frame_is_the_black_frame_read_through_other_frame_in_order() {
         assert_eq!(read(b.added()), w.added(), "{}", format_sfen(&pos));
     }
 }
+
+/// The board of an SFEN read from the other side: each rank string reversed, a promoted piece's `+`
+/// kept in front of its letter. The hands, the side to move and the move number are untouched. Written
+/// out from the text, with no reference to a token table.
+fn mirrored_sfen(sfen: &str) -> String {
+    let mut fields = sfen.split(' ');
+    let board = fields.next().expect("a board");
+    let ranks: Vec<String> = board
+        .split('/')
+        .map(|rank| {
+            let mut cells: Vec<String> = Vec::new();
+            let mut chars = rank.chars();
+            while let Some(c) = chars.next() {
+                if c == '+' {
+                    cells.push(format!("+{}", chars.next().expect("a piece after +")));
+                } else if let Some(n) = c.to_digit(10) {
+                    cells.extend(std::iter::repeat_n("1".to_string(), n as usize));
+                } else {
+                    cells.push(c.to_string());
+                }
+            }
+            cells.reverse();
+            let (mut out, mut empty) = (String::new(), 0);
+            for cell in cells {
+                if cell == "1" {
+                    empty += 1;
+                } else {
+                    if empty > 0 {
+                        out.push_str(&empty.to_string());
+                        empty = 0;
+                    }
+                    out.push_str(&cell);
+                }
+            }
+            if empty > 0 {
+                out.push_str(&empty.to_string());
+            }
+            out
+        })
+        .collect();
+    std::iter::once(ranks.join("/"))
+        .chain(fields.map(str::to_string))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `mirror_row` is the left-right mirror, checked the long way round: the tokens of a position's mirror
+/// (its SFEN read right to left, then numbered by the definition) are the position's tokens through
+/// `mirror_row`, in both frames, and the reflection is an involution that commutes with the turn to the
+/// other frame.
+#[test]
+fn mirror_row_is_the_tokens_of_the_mirrored_position_and_commutes_with_the_frame_turn() {
+    for sfen in [STARTPOS, DROP_HEAVY, MIXED, EVERY_PROMOTION, FULL_HANDS] {
+        let mirror = mirrored_sfen(sfen);
+        for frame in [Color::Black, Color::White] {
+            let mut got: Vec<usize> = spec_tokens(sfen, frame)
+                .into_iter()
+                .map(|t| mirror_row(t as FeatureIndex) as usize)
+                .collect();
+            let mut want = spec_tokens(&mirror, frame);
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "{sfen} in the {frame:?} frame");
+        }
+    }
+    for row in 0..crate::types::NUM_FEATURES as FeatureIndex {
+        assert_eq!(mirror_row(mirror_row(row)), row, "involution at {row}");
+        assert_eq!(
+            other_frame(mirror_row(row)),
+            mirror_row(other_frame(row)),
+            "commutation at {row}"
+        );
+    }
+    // Something moves, and hands do not.
+    assert_ne!(mirror_row(0), 0);
+    assert_eq!(
+        mirror_row(BOARD_ROWS as FeatureIndex + 5),
+        BOARD_ROWS as FeatureIndex + 5
+    );
+}
+
+/// `folds` decides from the own king alone, in the frame's own view: it folds exactly when the own king
+/// is on the sixth to ninth file as that frame's owner counts them, for every pair of king files in both
+/// frames (the white frame reads the board turned round, so white's own file is `10 - f`).
+#[test]
+fn a_frame_folds_when_its_own_king_is_on_the_sixth_to_ninth_file() {
+    let rank = |file: usize, others: &str| {
+        let mut cells: Vec<char> = others.chars().collect();
+        cells.swap(4, 9 - file);
+        cells.into_iter().collect::<String>()
+    };
+    let mut seen = [[false; 2]; 2];
+    for black in 1..=9usize {
+        for white in 1..=9usize {
+            let sfen = format!(
+                "{}/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/{} b - 1",
+                rank(white, "lnsgkgsnl"),
+                rank(black, "LNSGKGSNL")
+            );
+            let pos = parse_sfen(&sfen).expect("a position");
+            let (b, w) = (
+                folds(&active_features(&pos, Color::Black)),
+                folds(&active_features(&pos, Color::White)),
+            );
+            // Black's own file as written; white's own file is the board turned: 10 - f.
+            assert_eq!(b, black >= 6, "black king on file {black}");
+            assert_eq!(w, (10 - white) >= 6, "white king on file {white}");
+            seen[usize::from(b)][usize::from(w)] = true;
+        }
+    }
+    assert_eq!(
+        seen, [[true; 2]; 2],
+        "all four combinations of the two frames' folds"
+    );
+    // No own king: not folded.
+    assert!(!folds(&[0, 1, 2]));
+}
