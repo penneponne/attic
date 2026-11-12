@@ -15,9 +15,9 @@ use attic_state::Color;
 
 use super::dense;
 use super::{
-    Accumulator, BLOCK_LEN, DIM, DUAL, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer, HAS_FIELD,
-    HAS_MOMENT, HAS_PAIR, HEAD, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT,
-    POWER_LEN, SECOND_INPUT, SymNetwork,
+    Accumulator, BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer,
+    HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD_AT, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, NOSQR, ORDER,
+    PAIR, PAIR_AT, POWER_LEN, SymNetwork,
 };
 
 pub(super) use dense::{dense_clip, dense_pre};
@@ -311,12 +311,17 @@ pub(super) fn sqr_clip(z: f32) -> f32 {
     (z * z).clamp(0.0, 1.0)
 }
 
-/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` into `out`, which is twice as long as `z`.
+/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` into `out`, which is twice as long as `z`. In the `nosqr`
+/// ablation the first half is the plain clip again.
 fn double(z: &[f32], out: &mut [f32]) {
     debug_assert_eq!(out.len(), 2 * z.len());
-    let (squares, clips) = out.split_at_mut(z.len());
-    for ((sq, clip), &z) in squares.iter_mut().zip(clips).zip(z) {
-        *sq = sqr_clip(z);
+    let (firsts, clips) = out.split_at_mut(z.len());
+    for ((first, clip), &z) in firsts.iter_mut().zip(clips).zip(z) {
+        *first = if NOSQR {
+            z.clamp(0.0, 1.0)
+        } else {
+            sqr_clip(z)
+        };
         *clip = z.clamp(0.0, 1.0);
     }
 }
@@ -335,15 +340,16 @@ fn dual_value(net: &SymNetwork, features: &[f32; FEATURE_LEN]) -> f32 {
         FirstLayer::I8(q) => q.layer_pre(features, &net.b1, &mut z1),
     }
 
-    let mut head = [0.0f32; HEAD];
-    let (first, second) = head.split_at_mut(SECOND_INPUT);
+    let mut head = [0.0f32; DOUBLED];
+    let (first, second) = head.split_at_mut(2 * HIDDEN);
     double(&z1, first);
 
     let mut z2 = [0.0f32; HIDDEN2];
     dense_pre(&net.w2, &net.b2, first, &mut z2);
     double(&z2, second);
 
-    net.value_b + dense::dot(&net.value_w, &head)
+    // The value row reads `[a1 ‖ a2]`, or the second layer's half alone under `noskip`.
+    net.value_b + dense::dot(&net.value_w, &head[HEAD_AT..])
 }
 
 #[cfg(test)]

@@ -102,7 +102,7 @@ pub(super) fn upto(n: usize) -> std::ops::Range<usize> {
 /// The smaller of two shape constants. Written as `HIDDEN.min(HIDDEN2)` it is a
 /// comparison clippy sees is decided at compile time, and refuses; through a
 /// function argument it is a number it does not know.
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "sym_dual"))]
 pub(super) fn least(a: usize, b: usize) -> usize {
     a.min(b)
 }

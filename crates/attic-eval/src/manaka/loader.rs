@@ -15,8 +15,8 @@ use super::body::read_body;
 use super::reader::Reader;
 use super::{
     DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
-    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, SECOND_INPUT, SymNetwork,
-    TOKENS, W1Precision,
+    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, NOSQR, ORDER, PAIR, PAIR_AT,
+    SECOND_INPUT, SymNetwork, TOKENS, W1Precision,
 };
 
 /// The container's version word, shared with every `nn.bin` YaneuraOu writes.
@@ -84,10 +84,24 @@ pub(super) fn expected_arch() -> String {
     // A dual head has words of its own, and the widths they imply: each hidden layer is
     // `DualClippedReLU` (a square clip beside a plain one), the second layer reads `2·HIDDEN`
     // and the value row, through `Skip`, reads both layers' activations. Still one `)` short.
-    let network = if DUAL {
+    //
+    // The ablations are spelled as the exporter spells them: `noskip` has no `Skip` (the value row
+    // is `2·HIDDEN2` wide), and `nosqr` swaps the word for `TwinClippedReLU`, a plain clip twice.
+    let act = if NOSQR {
+        "TwinClippedReLU"
+    } else {
+        "DualClippedReLU"
+    };
+    let network = if DUAL && NOSKIP {
         format!(
-            "Dense[1<-{HEAD}](Skip[{HIDDEN},{HIDDEN2}](DualClippedReLU[{HIDDEN2}]\
-             (Dense[{HIDDEN2}<-{SECOND_INPUT}](DualClippedReLU[{HIDDEN}]\
+            "Dense[1<-{HEAD}]({act}[{HIDDEN2}]\
+             (Dense[{HIDDEN2}<-{SECOND_INPUT}]({act}[{HIDDEN}]\
+             (Dense[{HIDDEN}<-{FEATURE_LEN}]({input}))))"
+        )
+    } else if DUAL {
+        format!(
+            "Dense[1<-{HEAD}](Skip[{HIDDEN},{HIDDEN2}]({act}[{HIDDEN2}]\
+             (Dense[{HIDDEN2}<-{SECOND_INPUT}]({act}[{HIDDEN}]\
              (Dense[{HIDDEN}<-{FEATURE_LEN}]({input})))))"
         )
     } else {

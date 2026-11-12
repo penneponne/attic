@@ -4,8 +4,8 @@ use attic_state::Position;
 
 use super::super::shape::SQUARES;
 use super::super::{
-    DIM, DUAL, FEATURE_LEN, FIELD, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR,
-    SymNetwork, TOKENS,
+    DIM, DUAL, FEATURE_LEN, FIELD, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD_AT, MOMENT, NOSQR, ORDER,
+    PAIR, SymNetwork, TOKENS,
 };
 use super::encode::column_of;
 use super::fixtures::{tokens_present, upto};
@@ -145,15 +145,17 @@ pub(super) fn reference_value(net: &SymNetwork, pos: &Position) -> f64 {
     };
     let clip = |z: Vec<f64>| -> Vec<f64> { z.into_iter().map(|z| z.clamp(0.0, 1.0)).collect() };
     let head = if DUAL {
+        // `nosqr` reads the plain clip in the square's place.
         let double = |z: &[f64]| -> Vec<f64> {
             z.iter()
-                .map(|z| (z * z).clamp(0.0, 1.0))
+                .map(|z| if NOSQR { *z } else { z * z }.clamp(0.0, 1.0))
                 .chain(z.iter().map(|z| z.clamp(0.0, 1.0)))
                 .collect()
         };
         let first = double(&pre(&net.w1, &net.b1, &features));
         let second = double(&pre(&net.w2, &net.b2, &first));
-        [first, second].concat()
+        // `noskip` leaves the first layer's half out of what the value row reads.
+        [first, second].concat().split_off(HEAD_AT)
     } else {
         clip(pre(
             &net.w2,
