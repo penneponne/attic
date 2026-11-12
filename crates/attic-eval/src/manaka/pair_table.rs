@@ -310,7 +310,9 @@ fn cube_cells(halves: &[u16]) -> Cells {
 // As `cube_cells`: `PAIR` may be zero where this is compiled but not called.
 #[allow(clippy::chunks_exact_to_as_chunks)]
 fn scaled_cells(halves: &[u16]) -> Cells {
-    let rows = halves.len() / ROW;
+    // `ROW` is zero in a shape without a pair table, which never gets here; the
+    // division is checked so that the build of that shape's tests compiles.
+    let rows = halves.len().checked_div(ROW).unwrap_or(0);
     let mut q = Aligned64::<u8>::zeroed(rows * SCALED_ROW);
     for (dst, src) in q.chunks_exact_mut(SCALED_ROW).zip(halves.chunks_exact(ROW)) {
         let (entries, scales) = dst.split_at_mut(ROW);
