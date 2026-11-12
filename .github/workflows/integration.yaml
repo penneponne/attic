@@ -128,8 +128,8 @@ jobs:
           cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu \
             ${{ matrix.args }} -- -D warnings
 
-  # The six SYNN shapes that are not rows of the matrices above (the pair table
-  # alone at order three and at order one, the KP and HalfKP feature spaces, and KP
+  # The seven SYNN shapes that are not rows of the matrices above (the pair table
+  # alone at order three and at order one, the same with a dual head, the KP and HalfKP feature spaces, and KP
   # and token at 256), and NNUE KP
   # at 128, which is not a row either. Each shares every line of code with a row
   # that is and differs in a constant, so what can go wrong with one is that it
@@ -148,6 +148,7 @@ jobs:
           for shape in \
             synn_token_128x2_32_32_pair16 \
             synn_token_128x2_32_32_pair16_o1 \
+            synn_token_128x2_32_32_pair16_o1_dual \
             synn_kp_128x2_32_32 \
             synn_kp_256x2_32_32 \
             synn_token_256x2_32_32 \

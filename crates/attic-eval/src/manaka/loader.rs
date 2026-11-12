@@ -14,8 +14,9 @@ use crate::types::NnueError;
 use super::body::read_body;
 use super::reader::Reader;
 use super::{
-    DIM, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HIDDEN, HIDDEN2,
-    MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, SymNetwork, TOKENS, W1Precision,
+    DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
+    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, SECOND_INPUT, SymNetwork,
+    TOKENS, W1Precision,
 };
 
 /// The container's version word, shared with every `nn.bin` YaneuraOu writes.
@@ -79,10 +80,22 @@ pub(super) fn expected_arch() -> String {
     // One `)` short, as the exporter's is: the outermost `Dense` is never
     // closed. What is closed here is the first layer and its activation, and the
     // second layer and its activation too.
-    let network = format!(
-        "Dense[1<-{HIDDEN2}](ClippedReLU[{HIDDEN2}](Dense[{HIDDEN2}<-{HIDDEN}]\
-         (ClippedReLU[{HIDDEN}](Dense[{HIDDEN}<-{FEATURE_LEN}]({input}))))"
-    );
+    //
+    // A dual head has words of its own, and the widths they imply: each hidden layer is
+    // `DualClippedReLU` (a square clip beside a plain one), the second layer reads `2·HIDDEN`
+    // and the value row, through `Skip`, reads both layers' activations. Still one `)` short.
+    let network = if DUAL {
+        format!(
+            "Dense[1<-{HEAD}](Skip[{HIDDEN},{HIDDEN2}](DualClippedReLU[{HIDDEN2}]\
+             (Dense[{HIDDEN2}<-{SECOND_INPUT}](DualClippedReLU[{HIDDEN}]\
+             (Dense[{HIDDEN}<-{FEATURE_LEN}]({input})))))"
+        )
+    } else {
+        format!(
+            "Dense[1<-{HIDDEN2}](ClippedReLU[{HIDDEN2}](Dense[{HIDDEN2}<-{HIDDEN}]\
+             (ClippedReLU[{HIDDEN}](Dense[{HIDDEN}<-{FEATURE_LEN}]({input}))))"
+        )
+    };
     format!("Features={features}{DIM}x2],Network={network}")
 }
 

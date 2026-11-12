@@ -24,7 +24,7 @@ mod sym_common;
 
 use attic_eval::manaka::{
     Accumulator, DIM, FEATURE_LEN, FIELD, FIELD_LEN, HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_LEN,
-    ORDER, PAIR, PAIR_ROWS, TOKENS, evaluate_value, load_network,
+    ORDER, PAIR, PAIR_ROWS, SECOND_INPUT, TOKENS, evaluate_value, load_network,
 };
 use attic_state::{Color, Position};
 use sym_common::{network_path, relative_drift};
@@ -43,7 +43,7 @@ fn a_trained_network_loads_at_the_declared_shape() {
     assert_eq!(net.gamma.len(), ORDER * DIM);
     assert_eq!(net.w1.len(), HIDDEN * FEATURE_LEN);
     assert_eq!(net.b1.len(), HIDDEN);
-    assert_eq!(net.w2.len(), HIDDEN2 * HIDDEN);
+    assert_eq!(net.w2.len(), HIDDEN2 * SECOND_INPUT);
     assert_eq!(net.b2.len(), HIDDEN2);
     assert_eq!(net.value_w.len(), HEAD);
     assert_eq!(net.pair_gamma.len(), PAIR);

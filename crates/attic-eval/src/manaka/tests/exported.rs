@@ -74,3 +74,14 @@ pub(super) const EXPORTED: Exported = Exported {
     rest: "Tokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-1196](ClipScaled[384](Newton[3](PowerSum[3](InputSlice[384(0:384)]))),ClipScaled[16](PairSum[16](InputSlice[16(384:400)])),ClipScaled[36](SecondMoment[8](InputSlice[36(400:436)])),ClipScaled[162](SquareField[2](InputSlice[162(436:598)]))))))",
     hash: 0x00191180,
 };
+
+/// From the file `manaka-train export-nnue` wrote for this shape's seed-1 initial net
+/// (`pair16_d128_o1_h32_h232_dual`, tideborn branch `feat/synn-dual-act`, 2026-11-12); the
+/// string depends on the shape alone. The two hidden layers are `DualClippedReLU` — a square
+/// clip beside a plain one — the second layer reads `2 · 32`, and `Skip` joins the activations
+/// of both layers into the value row, which is `2 · (32 + 32)` wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-128](Skip[32,32](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)])))))))",
+    hash: 0xc450c6de,
+};

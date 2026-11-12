@@ -119,13 +119,26 @@ impl QuantW1 {
         // layer: a `Vec` would be an allocation per node, and a buffer sized for the
         // widest shape would be cleared in full on every call.
         let mut x = [0i16; INPUT_STRIDE];
-        self.layer_clip_with(input, bias, out, &mut x);
+        self.layer_with::<true>(input, bias, out, &mut x);
+    }
+
+    /// `out[row] = bias[row] + weights[row] · input`: [`QuantW1::layer_clip`] without the
+    /// clip, for a head that reads the sum itself (the dual head squares it before it clips).
+    pub fn layer_pre(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
+        let mut x = [0i16; INPUT_STRIDE];
+        self.layer_with::<false>(input, bias, out, &mut x);
     }
 
     /// [`QuantW1::layer_clip`] with the buffer for the quantised input supplied, which
     /// has to be one row's padded width (`stride`). Split out so that the tests can
     /// run a layer of any width.
-    fn layer_clip_with(&self, input: &[f32], bias: &[f32], out: &mut [f32], x: &mut [i16]) {
+    fn layer_with<const CLIP: bool>(
+        &self,
+        input: &[f32],
+        bias: &[f32],
+        out: &mut [f32],
+        x: &mut [i16],
+    ) {
         debug_assert_eq!(input.len(), self.cols);
         debug_assert_eq!(out.len(), self.rows);
         debug_assert_eq!(bias.len(), self.rows);
@@ -137,13 +150,15 @@ impl QuantW1 {
         while at + ROWS <= self.rows {
             let sums = dots::<ROWS>(std::array::from_fn(|r| row(at + r)), x);
             for (r, sum) in sums.into_iter().enumerate() {
-                out[at + r] = (bias[at + r] + sum as f32 * self.scale[at + r]).clamp(0.0, 1.0);
+                let z = bias[at + r] + sum as f32 * self.scale[at + r];
+                out[at + r] = if CLIP { z.clamp(0.0, 1.0) } else { z };
             }
             at += ROWS;
         }
         while at < self.rows {
             let sum = dots::<1>([row(at)], x)[0];
-            out[at] = (bias[at] + sum as f32 * self.scale[at]).clamp(0.0, 1.0);
+            let z = bias[at] + sum as f32 * self.scale[at];
+            out[at] = if CLIP { z.clamp(0.0, 1.0) } else { z };
             at += 1;
         }
     }
@@ -152,7 +167,7 @@ impl QuantW1 {
     #[cfg(test)]
     pub(super) fn layer_clip_any_width(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
         let mut x = vec![0i16; self.stride];
-        self.layer_clip_with(input, bias, out, &mut x);
+        self.layer_with::<true>(input, bias, out, &mut x);
     }
 
     /// The `i32` total of one row against an already-quantised input, for the tests.

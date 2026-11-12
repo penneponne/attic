@@ -8,7 +8,7 @@ use attic_state::{Move, Position};
 
 use super::super::{
     DIM, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_LEN,
-    ORDER, PAIR, PAIR_ROWS, PairTable, SymNetwork, TOKENS,
+    ORDER, PAIR, PAIR_ROWS, PairTable, SECOND_INPUT, SymNetwork, TOKENS,
 };
 
 /// The synthetic pair table from values drawn in `f32`: rounded to halves the way
@@ -55,7 +55,7 @@ pub(super) fn synthetic() -> &'static SymNetwork {
                 .collect(),
             w1: rng.fill(HIDDEN * FEATURE_LEN, 0.3 * Gain::W1),
             b1: rng.fill(HIDDEN, 0.3),
-            w2: rng.fill(HIDDEN2 * HIDDEN, 0.3 * Gain::W2),
+            w2: rng.fill(HIDDEN2 * SECOND_INPUT, 0.3 * Gain::W2),
             b2: rng.fill(HIDDEN2, 0.3),
             value_w: rng.fill(HEAD, 0.3),
             value_b: 0.1,
@@ -102,6 +102,7 @@ pub(super) fn upto(n: usize) -> std::ops::Range<usize> {
 /// The smaller of two shape constants. Written as `HIDDEN.min(HIDDEN2)` it is a
 /// comparison clippy sees is decided at compile time, and refuses; through a
 /// function argument it is a number it does not know.
+#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
 pub(super) fn least(a: usize, b: usize) -> usize {
     a.min(b)
 }

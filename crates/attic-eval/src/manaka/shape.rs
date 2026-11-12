@@ -26,6 +26,10 @@ struct Dims {
     /// Channels per square of the square field, or 0 for a shape without one.
     /// The block it feeds is 81 squares of that many channels.
     field: usize,
+    /// Whether each hidden layer is read twice, as `clamp(z², 0, 1)` beside `clamp(z, 0, 1)`:
+    /// Stockfish's `SqrClippedReLU` and `ClippedReLU` side by side. The second layer then
+    /// reads twice the first layer's width, and the value row reads both layers' activations.
+    dual: bool,
 }
 
 impl Dims {
@@ -39,7 +43,12 @@ impl Dims {
             pair: 0,
             moment: 0,
             field: 0,
+            dual: false,
         }
+    }
+
+    const fn dual(self) -> Dims {
+        Dims { dual: true, ..self }
     }
 
     const fn pair(self, pair: usize) -> Dims {
@@ -79,6 +88,9 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(256, 3, 32, 32)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16") {
     Dims::new(128, 3, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_dual") {
+    // The same shape with both hidden layers doubled into a square clip and a plain clip.
+    Dims::new(128, 1, 32, 32).pair(16).dual()
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1") {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
@@ -102,8 +114,20 @@ pub const HIDDEN: usize = DIMS.hidden;
 /// The second hidden layer's width.
 pub const HIDDEN2: usize = DIMS.hidden2;
 
-/// What the value row reads: the last hidden layer, which is the second.
-pub const HEAD: usize = HIDDEN2;
+/// Whether the hidden layers are doubled: see [`Dims::dual`].
+pub const DUAL: bool = DIMS.dual;
+
+/// What the second hidden layer reads: the first layer's activations, which are twice as
+/// many when each unit is read twice.
+pub const SECOND_INPUT: usize = if DUAL { 2 * HIDDEN } else { HIDDEN };
+
+/// What the value row reads: the last hidden layer, which is the second; or, doubled, both
+/// layers' activations side by side, `[a1 ‖ a2]`.
+pub const HEAD: usize = if DUAL {
+    2 * (HIDDEN + HIDDEN2)
+} else {
+    HIDDEN2
+};
 
 /// Rows of the embedding table.
 ///
@@ -197,6 +221,7 @@ const _: () = {
         "synn_token_256x2_32_32",
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
+        "synn_token_128x2_32_32_pair16_o1_dual",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(

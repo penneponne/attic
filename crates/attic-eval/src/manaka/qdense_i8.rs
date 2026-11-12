@@ -92,13 +92,26 @@ impl QuantW1I8 {
     pub fn layer_clip(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
         // On the stack and exactly as wide as the layer, as the `i16` layer's is.
         let mut x = [0u8; INPUT_STRIDE];
-        self.layer_clip_with(input, bias, out, &mut x);
+        self.layer_with::<true>(input, bias, out, &mut x);
+    }
+
+    /// `out[row] = bias[row] + weights[row] · input`: [`QuantW1I8::layer_clip`] without the
+    /// clip, for a head that reads the sum itself (the dual head squares it before it clips).
+    pub fn layer_pre(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
+        let mut x = [0u8; INPUT_STRIDE];
+        self.layer_with::<false>(input, bias, out, &mut x);
     }
 
     /// [`QuantW1I8::layer_clip`] with the buffer for the quantised input supplied,
     /// which has to be one row's padded width (`stride`). Split out so that the
     /// tests can run a layer of any width.
-    fn layer_clip_with(&self, input: &[f32], bias: &[f32], out: &mut [f32], x: &mut [u8]) {
+    fn layer_with<const CLIP: bool>(
+        &self,
+        input: &[f32],
+        bias: &[f32],
+        out: &mut [f32],
+        x: &mut [u8],
+    ) {
         debug_assert_eq!(input.len(), self.cols);
         debug_assert_eq!(out.len(), self.rows);
         debug_assert_eq!(bias.len(), self.rows);
@@ -110,13 +123,15 @@ impl QuantW1I8 {
         while at + ROWS <= self.rows {
             let sums = dots::<ROWS>(std::array::from_fn(|r| row(at + r)), x);
             for (r, sum) in sums.into_iter().enumerate() {
-                out[at + r] = (bias[at + r] + sum as f32 * self.scale[at + r]).clamp(0.0, 1.0);
+                let z = bias[at + r] + sum as f32 * self.scale[at + r];
+                out[at + r] = if CLIP { z.clamp(0.0, 1.0) } else { z };
             }
             at += ROWS;
         }
         while at < self.rows {
             let sum = dots::<1>([row(at)], x)[0];
-            out[at] = (bias[at] + sum as f32 * self.scale[at]).clamp(0.0, 1.0);
+            let z = bias[at] + sum as f32 * self.scale[at];
+            out[at] = if CLIP { z.clamp(0.0, 1.0) } else { z };
             at += 1;
         }
     }
@@ -125,7 +140,7 @@ impl QuantW1I8 {
     #[cfg(test)]
     pub(super) fn layer_clip_any_width(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
         let mut x = vec![0u8; self.stride];
-        self.layer_clip_with(input, bias, out, &mut x);
+        self.layer_with::<true>(input, bias, out, &mut x);
     }
 
     #[cfg(test)]
