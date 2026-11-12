@@ -26,6 +26,9 @@ struct Dims {
     /// Channels per square of the square field, or 0 for a shape without one.
     /// The block it feeds is 81 squares of that many channels.
     field: usize,
+    /// How far apart two board tokens may be for their pair to have a row that is
+    /// read: [`MAX_PAIR_RADIUS`] reads every pair. See [`PAIR_RADIUS`].
+    radius: usize,
 }
 
 impl Dims {
@@ -39,6 +42,7 @@ impl Dims {
             pair: 0,
             moment: 0,
             field: 0,
+            radius: MAX_PAIR_RADIUS,
         }
     }
 
@@ -53,7 +57,16 @@ impl Dims {
     const fn field(self, field: usize) -> Dims {
         Dims { field, ..self }
     }
+
+    const fn radius(self, radius: usize) -> Dims {
+        Dims { radius, ..self }
+    }
 }
+
+/// The largest Chebyshev distance two squares of the board can be apart: nine
+/// files by nine ranks, so each axis runs 0 to 8. A pair table cut at this radius
+/// keeps every pair, which is the table of every shape that is not cut.
+pub const MAX_PAIR_RADIUS: usize = 8;
 
 /// One row per shape, or per set of dimensions that the KP, HalfKP and plain
 /// token shapes share. The feature space is not here: it is `sym_kp`,
@@ -79,6 +92,10 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(256, 3, 32, 32)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16") {
     Dims::new(128, 3, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r4") {
+    Dims::new(128, 1, 32, 32).pair(16).radius(4)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r2") {
+    Dims::new(128, 1, 32, 32).pair(16).radius(2)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1") {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
@@ -115,6 +132,23 @@ pub const TOKENS: usize = crate::types::NUM_FEATURES;
 
 /// Channels of the pair table, or 0 when the shape has none.
 pub const PAIR: usize = DIMS.pair;
+
+/// How far apart two board tokens may be, in squares of the larger of the file and
+/// rank differences, for their pair's row to be read. A pair that touches a hand
+/// token or a king is always read. [`MAX_PAIR_RADIUS`], which is every shape's but
+/// the `_r` ones, reads every pair.
+///
+/// A pair the radius cuts is not in the network: the trainer's
+/// `--pair-radius` does not read it, does not train it and writes zeros for it,
+/// so a net trained at a radius has no information in the rows this skips, and a
+/// build at a radius other than its net's would read rows that were never trained
+/// or skip ones that were. Nothing in the file says which radius it was trained
+/// at; the shape does.
+pub const PAIR_RADIUS: usize = DIMS.radius;
+
+/// Whether the shape cuts its pair table: a constant, so that a shape that does
+/// not has none of the filter in its build.
+pub const PAIR_CUT: bool = PAIR_RADIUS < MAX_PAIR_RADIUS;
 
 /// Channels of the second moment's embedding, or 0 when the shape has none.
 pub const MOMENT: usize = DIMS.moment;
@@ -197,6 +231,8 @@ const _: () = {
         "synn_token_256x2_32_32",
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
+        "synn_token_128x2_32_32_pair16_o1_r4",
+        "synn_token_128x2_32_32_pair16_o1_r2",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(
@@ -217,6 +253,12 @@ const _: () = {
     assert!(
         !HAS_PAIR || cfg!(feature = "sym_token"),
         "a pair table exists only in the token space"
+    );
+    // A radius cuts the pairs of a pair table, so there has to be one, and it is
+    // a distance between two squares of the board.
+    assert!(
+        PAIR_RADIUS <= MAX_PAIR_RADIUS && (!PAIR_CUT || HAS_PAIR),
+        "a pair radius needs a pair table and is at most the board's width less one"
     );
     // The moment and the field want a row per token, as the embedding does, and
     // the other spaces have up to 125,389 of them: a field of eight channels per
