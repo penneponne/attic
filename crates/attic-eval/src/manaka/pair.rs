@@ -31,6 +31,117 @@ pub(super) fn pair_row(a: FeatureIndex, b: FeatureIndex) -> usize {
     lo * (2 * TOKENS - lo - 1) / 2 + (hi - lo - 1)
 }
 
+/// The most tokens a position holds, which is the most `others` a touch has to read
+/// rows against (a token is never its own other, so one fewer would do; the rest is
+/// slack for the padding to whole registers).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+const MAX_OTHERS: usize = crate::tokens::MAX_ACTIVE_FEATURES;
+
+/// What [`row_offsets`] hands back: room for [`MAX_OTHERS`] offsets, in whole
+/// registers of eight.
+#[cfg(any(test, all(target_arch = "x86_64", target_feature = "avx2")))]
+pub(super) const OFFSETS: usize = crate::tokens::MAX_ACTIVE_FEATURES.next_multiple_of(8);
+
+/// `pair_row(token, other) · stride` for each of `others`, in order: where in the
+/// table, in units of `stride`, each row starts. The entries past `others.len()`
+/// are not meaningful.
+///
+/// The kernels that add rows read the whole list before they add any, so the
+/// arithmetic that finds a row (a compare, a multiplication and a handful of
+/// additions: more instructions than the row's eight loads) is done eight rows to a
+/// register, ahead of the loads and out of their way. It is `pair_row`'s formula
+/// exactly, in `u32`, which holds it: `lo · (2 · TOKENS − 1 − lo)` is under 5.5
+/// million and the offset under `PAIR_ROWS · stride`, asserted to fit.
+///
+/// # Panics
+/// Panics if `others` is longer than [`OFFSETS`], or if the table is so large that
+/// an offset does not fit in a `u32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+pub(super) fn row_offsets(
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    stride: usize,
+) -> [u32; OFFSETS] {
+    assert!(
+        others.len() <= OFFSETS,
+        "a position has at most {MAX_OTHERS} tokens"
+    );
+    assert!(
+        PAIR_ROWS * stride <= u32::MAX as usize,
+        "an offset fits a u32"
+    );
+    // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+    unsafe { row_offsets_avx2(token, others, stride as u32) }
+}
+
+/// [`row_offsets`] one row at a time, through [`pair_row`]: the reference the AVX2
+/// path is held to.
+#[cfg(test)]
+pub(super) fn row_offsets_scalar(
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    stride: usize,
+) -> [u32; OFFSETS] {
+    let mut out = [0u32; OFFSETS];
+    for (slot, &other) in out.iter_mut().zip(others) {
+        *slot = (pair_row(token, other) * stride) as u32;
+    }
+    out
+}
+
+/// [`row_offsets_scalar`] eight rows to a register.
+///
+/// The last register is loaded under a mask, so that no entry past `others` is
+/// read; its unused lanes see a zero token and their results are not meaningful.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn row_offsets_avx2(
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    stride: u32,
+) -> [u32; OFFSETS] {
+    use std::arch::x86_64::*;
+
+    let mut out = [0u32; OFFSETS];
+    let this = _mm256_set1_epi32(token as i32);
+    let across = _mm256_set1_epi32((2 * TOKENS - 1) as i32);
+    let one = _mm256_set1_epi32(1);
+    let stride = _mm256_set1_epi32(stride as i32);
+    let lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    for at in (0..others.len()).step_by(LANES) {
+        let left = others.len() - at;
+        // SAFETY: `at + min(left, 8) <= others.len()`: a whole register is loaded
+        // only when eight entries are left, and a masked one touches only the lanes
+        // below `left`. `at + 8 <= OFFSETS` bounds the store, which is unaligned.
+        let (lo, hi) = unsafe {
+            let other = if left >= LANES {
+                _mm256_loadu_si256(others.as_ptr().add(at).cast())
+            } else {
+                let mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(left as i32), lane);
+                _mm256_maskload_epi32(others.as_ptr().add(at).cast(), mask)
+            };
+            (_mm256_min_epu32(this, other), _mm256_max_epu32(this, other))
+        };
+        // `lo · (2 · TOKENS − 1 − lo) / 2 + (hi − lo − 1)`; the product is even, so
+        // the shift is the division.
+        let triangle = _mm256_srli_epi32::<1>(_mm256_mullo_epi32(lo, _mm256_sub_epi32(across, lo)));
+        let row = _mm256_add_epi32(triangle, _mm256_sub_epi32(_mm256_sub_epi32(hi, lo), one));
+        // SAFETY: see above.
+        unsafe {
+            _mm256_storeu_si256(
+                out.as_mut_ptr().add(at).cast(),
+                _mm256_mullo_epi32(row, stride),
+            );
+        }
+    }
+    out
+}
+
 /// The group of channels the AVX2 path adds at once: a register of `f32`.
 const LANES: usize = 8;
 
@@ -192,10 +303,11 @@ pub(super) unsafe fn row_totals_avx2(
     // the table is that many rows long.
     assert_eq!(halves.len(), PAIR_ROWS * ROW);
     let base = halves.as_ptr();
-    let row = |other: FeatureIndex| -> *const u16 {
+    let offsets = row_offsets(token, others, ROW);
+    let row = |at: usize| -> *const u16 {
         // SAFETY: the row starts `pair_row · ROW` in, and the whole row is in the
         // table (asserted above).
-        unsafe { base.add(pair_row(token, other) * ROW) }
+        unsafe { base.add(offsets[at] as usize) }
     };
     let mut even = [_mm256_setzero_ps(); GROUPS];
     let mut odd = [_mm256_setzero_ps(); GROUPS];
@@ -207,13 +319,14 @@ pub(super) unsafe fn row_totals_avx2(
             *total = _mm256_add_ps(*total, _mm256_cvtph_ps(eight));
         }
     };
-    let (twos, last) = others.as_chunks::<2>();
-    for &[a, b] in twos {
-        add_row(&mut even, row(a));
-        add_row(&mut odd, row(b));
+    let mut at = 0;
+    while at + 2 <= others.len() {
+        add_row(&mut even, row(at));
+        add_row(&mut odd, row(at + 1));
+        at += 2;
     }
-    for &other in last {
-        add_row(&mut even, row(other));
+    if at < others.len() {
+        add_row(&mut even, row(at));
     }
     let mut out = [0.0f32; ROW];
     for ((chunk, e), o) in out.as_chunks_mut::<LANES>().0.iter_mut().zip(even).zip(odd) {
