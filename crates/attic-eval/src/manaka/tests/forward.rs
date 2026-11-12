@@ -2,10 +2,10 @@
 
 use attic_state::{Color, Position, parse_sfen};
 
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "dual_head"))]
 use super::super::forward::dense_clip;
 use super::super::forward::features_from_sums;
-#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual")]
+#[cfg(feature = "dual_head")]
 use super::super::forward::{dense_pre, sqr_clip};
 use super::super::{
     Accumulator, FEATURE_LEN, FinnyCache, HIDDEN, HIDDEN2, W1Precision, evaluate_pre,
@@ -71,7 +71,7 @@ fn the_value_is_linear() {
 /// first is its clip: a unit of `3` arrives as `1`, and of `-3` as `0`. In the
 /// second the second layer's own bias drives it past each rail from either side,
 /// which the first scenario's small products never reach.
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "dual_head"))]
 #[test]
 fn a_hidden_layer_clips_at_both_ends() {
     use super::fixtures::least;
@@ -124,7 +124,7 @@ fn a_hidden_layer_clips_at_both_ends() {
 /// The biases are picked to land every unit somewhere a clip can tell from the square: `0.5`
 /// squares to `0.25` and clips to `0.5`, `-0.5` squares to `0.25` and clips to `0`, `2` is
 /// on the rail both ways, `-2` squares to the rail and clips to zero.
-#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual")]
+#[cfg(feature = "dual_head")]
 #[test]
 fn a_dual_head_reads_each_layer_as_a_square_clip_and_a_plain_clip() {
     use super::super::{HEAD, SECOND_INPUT};
@@ -183,7 +183,7 @@ fn a_dual_head_reads_each_layer_as_a_square_clip_and_a_plain_clip() {
 /// The test net lets the squares be seen: both layers' sums sit inside `(-1, 1)` often enough
 /// for `z²` to be a number between the rails, and outside it often enough to reach them, so a
 /// reader that dropped the square (or took `|z|`) would not agree with the reference.
-#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual")]
+#[cfg(feature = "dual_head")]
 #[test]
 fn a_test_net_exercises_the_square_clip_in_both_layers() {
     let net = synthetic();
@@ -238,7 +238,7 @@ fn a_test_net_exercises_the_square_clip_in_both_layers() {
 
 /// What the head reads: `(name, start, length)` of every block in one
 /// perspective's share, at the offsets `shape.rs` gives.
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "dual_head"))]
 fn blocks() -> Vec<(String, usize, usize)> {
     use super::super::{
         DIM, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT_AT, MOMENT_LEN, ORDER,
@@ -265,7 +265,7 @@ fn blocks() -> Vec<(String, usize, usize)> {
 /// other, and a clip that was never reached (or only ever reached from one side)
 /// is a clip nobody tested. So: every block has entries strictly inside `(0, 1)`
 /// in a good share of its positions, and every block reaches both rails.
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "dual_head"))]
 #[test]
 fn a_test_net_exercises_the_clip_in_every_block_and_layer() {
     use super::super::BLOCK_LEN;

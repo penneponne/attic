@@ -71,6 +71,12 @@ impl PairPrecision {
 }
 
 /// What the table holds.
+///
+/// `Cubes` carries `2 · PAIR` scales inline, which clippy finds large once `PAIR` is 32
+/// (a 272-byte variant beside a 16-byte one). A network holds one of these, not an array
+/// of them, and boxing the scales would put a pointer between the pair sum and them, so
+/// the size stays.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(super) enum Cells {
     /// `[PAIR_ROWS][ROW]` halves.

@@ -91,6 +91,15 @@ const DIMS: Dims = if cfg!(any(
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_dual") {
     // The same shape with both hidden layers doubled into a square clip and a plain clip.
     Dims::new(128, 1, 32, 32).pair(16).dual()
+} else if cfg!(feature = "synn_token_32x2_32_32_pair32_o1_dual") {
+    // The dual head with the embedding narrowed to 32 and the pair table widened to 32 channels.
+    Dims::new(32, 1, 32, 32).pair(32).dual()
+} else if cfg!(feature = "synn_token_64x2_32_32_pair16_o1_dual") {
+    // The dual head with the embedding halved to 64, the pair table as it was.
+    Dims::new(64, 1, 32, 32).pair(16).dual()
+} else if cfg!(feature = "synn_token_32x2_32_32_pair24_o1_dual") {
+    // The dual head with the embedding narrowed to 32 and the pair table widened to 24 channels.
+    Dims::new(32, 1, 32, 32).pair(24).dual()
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1") {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
@@ -222,6 +231,9 @@ const _: () = {
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
         "synn_token_128x2_32_32_pair16_o1_dual",
+        "synn_token_32x2_32_32_pair32_o1_dual",
+        "synn_token_64x2_32_32_pair16_o1_dual",
+        "synn_token_32x2_32_32_pair24_o1_dual",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(

@@ -53,7 +53,7 @@ pub(super) fn synthetic() -> &'static SymNetwork {
                 .enumerate()
                 .map(|(i, g)| (1.0 + g) * Gain::order(i / DIM))
                 .collect(),
-            w1: rng.fill(HIDDEN * FEATURE_LEN, 0.3 * Gain::W1),
+            w1: rng.fill(HIDDEN * FEATURE_LEN, 0.3 * Gain::W1 * Gain::w1_width()),
             b1: rng.fill(HIDDEN, 0.3),
             w2: rng.fill(HIDDEN2 * SECOND_INPUT, 0.3 * Gain::W2),
             b2: rng.fill(HIDDEN2, 0.3),
@@ -85,6 +85,19 @@ impl Gain {
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
 
+    /// The first layer's input width the fixture was calibrated on: pair16 at order one,
+    /// `2 · (128 + 16)`, the narrowest of the shapes that were tested until the narrow
+    /// embeddings came. An input narrower than that keeps the first layer's sums inside
+    /// `(-1, 1)`, and the dual head's square clip never reaches its rail in the test that
+    /// looks for it. The weights are widened in proportion to the shortfall, `288 / n`
+    /// (at `√(288 / n)` the pair32 d32 net still had no first-layer sum outside it), and by
+    /// one for every shape at or above 288, so those nets are what they were.
+    const W1_REFERENCE_LEN: usize = 288;
+
+    fn w1_width() -> f32 {
+        (Self::W1_REFERENCE_LEN as f32 / FEATURE_LEN as f32).max(1.0)
+    }
+
     /// The power-sum block of order `k + 1`: the sums grow with the order.
     fn order(k: usize) -> f32 {
         [0.2, 0.1, 0.1, 0.05][k.min(3)]
@@ -102,7 +115,7 @@ pub(super) fn upto(n: usize) -> std::ops::Range<usize> {
 /// The smaller of two shape constants. Written as `HIDDEN.min(HIDDEN2)` it is a
 /// comparison clippy sees is decided at compile time, and refuses; through a
 /// function argument it is a number it does not know.
-#[cfg(not(feature = "synn_token_128x2_32_32_pair16_o1_dual"))]
+#[cfg(not(feature = "dual_head"))]
 pub(super) fn least(a: usize, b: usize) -> usize {
     a.min(b)
 }
