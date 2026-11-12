@@ -15,8 +15,8 @@ use super::body::read_body;
 use super::reader::Reader;
 use super::{
     DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
-    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, SECOND_INPUT, SymNetwork,
-    TOKENS, W1Precision,
+    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, PairPrecision,
+    SECOND_INPUT, SymNetwork, TOKENS, W1Precision,
 };
 
 /// The container's version word, shared with every `nn.bin` YaneuraOu writes.
@@ -134,6 +134,12 @@ pub fn load_network(path: &Path) -> Result<SymNetwork, NnueError> {
     // bytes they made, keep the `f32` layer.
     let name = std::env::var("ATTIC_SYNN_W1").ok();
     net.use_first_layer(W1Precision::from_name(name.as_deref()));
+    // The pair table stays the file's halves unless `ATTIC_SYNN_PAIR` names one of
+    // the byte roundings: `i8` (cube-rounded, a scale to a channel) or `i8row` (a
+    // scale to each half of a row). Half the bytes to read a row, for a rounding
+    // the `f16` table does not have.
+    let name = std::env::var("ATTIC_SYNN_PAIR").ok();
+    net.use_pair_precision(PairPrecision::from_name(name.as_deref()));
     Ok(net)
 }
 
