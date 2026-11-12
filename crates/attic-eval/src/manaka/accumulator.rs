@@ -369,9 +369,7 @@ impl Accumulator {
         let (b, w) = (Color::Black.index(), Color::White.index());
         for (&token, &other) in black.removed().iter().zip(white.removed()) {
             for (i, token) in [(b, token), (w, other)] {
-                let at = self.active[i]
-                    .iter()
-                    .position(|&present| present == token)
+                let at = position_of(&self.active[i], token)
                     .expect("a removed token was not in the accumulator it is removed from");
                 self.active[i].swap_remove(at);
             }
@@ -390,6 +388,51 @@ impl Accumulator {
             }
         }
     }
+}
+
+/// Where `token` is in `list`, the first place it is: what `iter().position` finds,
+/// eight entries at a time. A position has each token once, so there is no second
+/// place to be told apart from.
+#[cfg(feature = "sym_token")]
+#[inline]
+fn position_of(list: &[FeatureIndex], token: FeatureIndex) -> Option<usize> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        unsafe { position_of_avx2(list, token) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        list.iter().position(|&present| present == token)
+    }
+}
+
+/// [`position_of`] on AVX2: a compare of eight entries and a mask for each whole
+/// group, then the entries after the last whole group one at a time.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(feature = "sym_token", target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn position_of_avx2(list: &[FeatureIndex], token: FeatureIndex) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    let needle = _mm256_set1_epi32(token as i32);
+    let mut at = 0;
+    while at + 8 <= list.len() {
+        // SAFETY: `at + 8 <= list.len()`; the load is unaligned.
+        let group = unsafe { _mm256_loadu_si256(list.as_ptr().add(at).cast()) };
+        let hits = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(group, needle)));
+        if hits != 0 {
+            return Some(at + hits.trailing_zeros() as usize);
+        }
+        at += 8;
+    }
+    list[at..]
+        .iter()
+        .position(|&present| present == token)
+        .map(|place| at + place)
 }
 
 /// What a half's power sums start from when they are built rather than derived.
@@ -417,6 +460,117 @@ static ZERO_SUMS: [f32; POWER_LEN] = [0.0; POWER_LEN];
 /// `ORDER` — so the sums are the same bits as copying `src` and updating it in
 /// place.
 fn accumulate(
+    src: &[f32],
+    dst: &mut [f32],
+    embed: &[f32],
+    removed: &[FeatureIndex],
+    added: &[FeatureIndex],
+) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        unsafe { accumulate_avx2(src, dst, embed, removed, added) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        accumulate_groups(src, dst, embed, removed, added);
+    }
+}
+
+/// How many groups of eight channels [`accumulate_avx2`] carries through the
+/// features at once: as many as keep their `ORDER` sums, and the row being added, in
+/// the sixteen registers, and a whole number of them to a row. Eight for the first
+/// order, whose sums are one register a group, and fewer for the higher ones.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+const TILE: usize = {
+    let groups = DIM / 8;
+    let mut tile = if 8 / ORDER > 0 { 8 / ORDER } else { 1 };
+    while !groups.is_multiple_of(tile) {
+        tile -= 1;
+    }
+    tile
+};
+
+/// [`accumulate_groups`] with a tile of groups taken through the features together,
+/// so that a feature's row is found once for the tile where the group at a time
+/// finds it again for every group, and the vector instructions are the whole of the
+/// loop's body.
+///
+/// A channel sees what it always saw — for each feature in order, `sums_k += sign ·
+/// v^k` and then the power raised by one more multiplication by `v`, `k` from one to
+/// `ORDER` — and channels do not read each other, so the sums are the same bits.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn accumulate_avx2(
+    src: &[f32],
+    dst: &mut [f32],
+    embed: &[f32],
+    removed: &[FeatureIndex],
+    added: &[FeatureIndex],
+) {
+    use std::arch::x86_64::*;
+
+    const LANES: usize = 8;
+    assert_eq!(src.len(), ORDER * DIM);
+    assert_eq!(dst.len(), ORDER * DIM);
+    // Every row read is `feature · DIM` in, `DIM` long; the check is once per
+    // feature and not once per group.
+    for &feature in removed.iter().chain(added) {
+        assert!(
+            (feature as usize + 1) * DIM <= embed.len(),
+            "a feature is a row of the embedding"
+        );
+    }
+    for tile in (0..DIM / LANES).step_by(TILE) {
+        let at = tile * LANES;
+        // `sums[t][k]`: group `t` of the tile, order `k + 1`.
+        let mut sums = [[_mm256_setzero_ps(); ORDER]; TILE];
+        for (t, group) in sums.iter_mut().enumerate() {
+            for (k, slot) in group.iter_mut().enumerate() {
+                // SAFETY: `k · DIM + at + t · 8 + 8 <= ORDER · DIM`, which is what
+                // `src` holds (asserted above); the load is unaligned.
+                *slot = unsafe { _mm256_loadu_ps(src.as_ptr().add(k * DIM + at + t * LANES)) };
+            }
+        }
+        for (features, subtract) in [(removed, true), (added, false)] {
+            for &feature in features {
+                // SAFETY: the row is `DIM` floats from `feature · DIM`, inside
+                // `embed` (asserted above); `at + TILE · 8 <= DIM`.
+                let row = unsafe { embed.as_ptr().add(feature as usize * DIM + at) };
+                for (t, group) in sums.iter_mut().enumerate() {
+                    // SAFETY: as above; the load is unaligned.
+                    let value = unsafe { _mm256_loadu_ps(row.add(t * LANES)) };
+                    let mut power = value;
+                    for (k, slot) in group.iter_mut().enumerate() {
+                        *slot = if subtract {
+                            _mm256_sub_ps(*slot, power)
+                        } else {
+                            _mm256_add_ps(*slot, power)
+                        };
+                        if k + 1 < ORDER {
+                            power = _mm256_mul_ps(power, value);
+                        }
+                    }
+                }
+            }
+        }
+        for (t, group) in sums.iter().enumerate() {
+            for (k, &slot) in group.iter().enumerate() {
+                // SAFETY: as for the loads from `src`, on `dst`.
+                unsafe { _mm256_storeu_ps(dst.as_mut_ptr().add(k * DIM + at + t * LANES), slot) };
+            }
+        }
+    }
+}
+
+/// [`accumulate`], a group of eight channels at a time; see there. What the AVX2
+/// form is held to.
+#[allow(dead_code)]
+fn accumulate_groups(
     src: &[f32],
     dst: &mut [f32],
     embed: &[f32],
@@ -478,6 +632,36 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sym_token")]
+    #[test]
+    fn the_position_of_a_token_is_where_iter_position_finds_it() {
+        let mut state = 3u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as FeatureIndex % 2400
+        };
+        for len in 0..=48usize {
+            for _ in 0..50 {
+                let mut list: Vec<FeatureIndex> = Vec::new();
+                while list.len() < len {
+                    let t = next();
+                    if !list.contains(&t) {
+                        list.push(t);
+                    }
+                }
+                for token in list.iter().copied().chain([next(), 0, 2399]) {
+                    assert_eq!(
+                        position_of(&list, token),
+                        list.iter().position(|&p| p == token),
+                        "len {len} token {token}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_batch_of_features_is_the_features_one_at_a_time_to_the_last_bit() {
         // A table of values of the size the embeddings have, spread either side of
@@ -512,8 +696,15 @@ mod tests {
                 one_at_a_time(&mut want, &embed, feature, 1.0);
             }
             accumulate(&start, &mut got, &embed, &removed, &added);
+            let mut grouped = vec![f32::NAN; ORDER * DIM];
+            accumulate_groups(&start, &mut grouped, &embed, &removed, &added);
             for (at, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert_eq!(g.to_bits(), w.to_bits(), "round {round} entry {at}");
+                assert_eq!(
+                    grouped[at].to_bits(),
+                    w.to_bits(),
+                    "grouped, round {round} entry {at}"
+                );
             }
         }
     }
