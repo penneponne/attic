@@ -280,7 +280,14 @@ const ALL_KINDS: [attic_state::PieceKind; 8] = {
     [Pawn, Lance, Knight, Silver, Gold, Bishop, Rook, King]
 };
 
-fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Option<(i32, i32)>)> {
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    Square(i32, i32),
+    King,
+    Hand,
+}
+
+fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Place)> {
     use crate::tokens::{HAND_KINDS, board_row, hand_row};
     use attic_state::{Color, Piece, PieceKind, Square};
 
@@ -296,8 +303,10 @@ fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Option<(i32, i32)
                 for sq in 0..Square::COUNT as u8 {
                     let sq = Square::from_index(sq).expect("a square");
                     // A king is read against everything, so it has no square here.
-                    let place = (kind != PieceKind::King)
-                        .then(|| (i32::from(sq.file()), i32::from(sq.rank())));
+                    let place = match kind {
+                        PieceKind::King => Place::King,
+                        _ => Place::Square(i32::from(sq.file()), i32::from(sq.rank())),
+                    };
                     out.push((board_row(piece, sq, frame), place));
                 }
             }
@@ -311,7 +320,7 @@ fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Option<(i32, i32)
                 _ => 2,
             };
             for copy in 0..most {
-                out.push((hand_row(owner, kind, copy, frame), None));
+                out.push((hand_row(owner, kind, copy, frame), Place::Hand));
             }
         }
     }
@@ -324,8 +333,8 @@ fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Option<(i32, i32)
 /// tokens stand for the white frame's row of the same pair.
 #[test]
 fn the_cut_is_the_definition_over_every_pair() {
-    use super::super::PAIR_RADIUS;
     use super::super::pair::pair_kept;
+    use super::super::{HAND_CUT, PAIR_RADIUS};
     use crate::tokens::other_frame;
     use attic_state::Color;
 
@@ -335,9 +344,13 @@ fn the_cut_is_the_definition_over_every_pair() {
         for (i, &(a, place_a)) in tokens.iter().enumerate() {
             for &(b, place_b) in &tokens[i + 1..] {
                 let want = match (place_a, place_b) {
-                    (Some((fa, ra)), Some((fb, rb))) => {
+                    (Place::Square(fa, ra), Place::Square(fb, rb)) => {
                         (fa - fb).unsigned_abs() as usize <= PAIR_RADIUS
                             && (ra - rb).unsigned_abs() as usize <= PAIR_RADIUS
+                    }
+                    // A held piece against a board piece that is not a king.
+                    (Place::Hand, Place::Square(..)) | (Place::Square(..), Place::Hand) => {
+                        !HAND_CUT
                     }
                     _ => true,
                 };
@@ -357,10 +370,12 @@ fn the_cut_is_the_definition_over_every_pair() {
         }
         // The trainer pins these counts over the same triangle; a cut that read a
         // different set of pairs from the one it was trained on would show here.
-        match PAIR_RADIUS {
-            2 => assert_eq!(kept, 1_042_476),
-            4 => assert_eq!(kept, 1_786_076),
-            8 => assert_eq!(kept, 2_745_996),
+        match (PAIR_RADIUS, HAND_CUT) {
+            (2, false) => assert_eq!(kept, 1_042_476),
+            (4, false) => assert_eq!(kept, 1_786_076),
+            (8, false) => assert_eq!(kept, 2_745_996),
+            (8, true) => assert_eq!(kept, 2_585_940),
+            (4, true) => assert_eq!(kept, 1_626_020),
             _ => {}
         }
     }

@@ -4,8 +4,8 @@ use attic_state::Position;
 
 use super::super::shape::SQUARES;
 use super::super::{
-    DIM, FEATURE_LEN, FIELD, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR, PAIR_RADIUS,
-    SymNetwork, TOKENS,
+    DIM, FEATURE_LEN, FIELD, HAND_CUT, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR,
+    PAIR_RADIUS, SymNetwork, TOKENS,
 };
 use super::encode::column_of;
 use super::fixtures::{tokens_present, upto};
@@ -23,15 +23,20 @@ fn counted_pair_row(a: u32, b: u32) -> usize {
 /// written out from the definition and not from the engine's tables.
 ///
 /// A token is a board piece (`id < 2268`, `id = (kind · 2 + theirs) · 81 + square`,
-/// kings are kind 7) or a held one. A pair that touches a held piece or a king is
-/// kept; two other pieces are when their squares, `file = square / 9` and
-/// `rank = square % 9`, are within the radius of each other on both axes.
+/// kings are kind 7) or a held one. A pair of two held pieces is kept, and so is one
+/// that touches a king; a held piece against any other board piece is kept unless the
+/// shape cuts the hand; two other pieces are kept when their squares,
+/// `file = square / 9` and `rank = square % 9`, are within the radius of each other
+/// on both axes.
 fn kept(a: u32, b: u32) -> bool {
     let board = |token: u32| token < 14 * 2 * 81;
-    if !board(a) || !board(b) {
-        return true;
+    let king = |token: u32| board(token) && token / 81 / 2 == 7;
+    match (board(a), board(b)) {
+        (false, false) => return true,
+        (false, true) => return !HAND_CUT || king(b),
+        (true, false) => return !HAND_CUT || king(a),
+        (true, true) => {}
     }
-    let king = |token: u32| token / 81 / 2 == 7;
     if king(a) || king(b) {
         return true;
     }
