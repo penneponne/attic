@@ -24,6 +24,9 @@ pub use book::{BookConfig, BookHit, BookInfoLine, BookProbeResult, Prng, probe_b
 // Re-exported so the Protocol layer can drive the NNUE fixed-point output scale
 // without the direct dependency on Evaluation the layering rules forbid.
 pub use attic_eval::{FV_SCALE_DEFAULT, fv_scale, set_fv_scale};
+// The same, for the counters a `clip_stats` build has: the `clipstats` command reads them.
+#[cfg(feature = "clip_stats")]
+pub use attic_eval::manaka::clip_stats;
 pub use timeman::{TimeInput, TimeManagement};
 
 pub use history::{

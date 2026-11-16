@@ -70,6 +70,10 @@ pub enum Command {
     /// verbatim; [`crate::bench::parse_bench`] gives them meaning (defaults, limit
     /// type, position source).
     Bench(Vec<String>),
+    /// `clipstats [reset]` — print how often each layer of the head sat on its floor or
+    /// ceiling, or zero the counts. Only a build with the `clip_stats` feature has counts; any
+    /// other says so. The raw trailing tokens are carried verbatim.
+    ClipStats(Vec<String>),
     Quit,
     Unknown(String),
     TooLong,
@@ -101,6 +105,7 @@ pub fn parse_line(input: &str) -> Command {
         // The trailing `bench` tokens are preserved verbatim for the semantic
         // parse in `crate::bench` (which fills defaults and validates them).
         "bench" => Command::Bench(parts.map(str::to_string).collect()),
+        "clipstats" => Command::ClipStats(parts.map(str::to_string).collect()),
         _ => Command::Unknown(trimmed.to_string()),
     }
 }
@@ -473,6 +478,15 @@ mod tests {
         assert_eq!(parse_line("gameover lose"), Command::GameOver);
         assert_eq!(parse_line("gameover draw"), Command::GameOver);
         assert_eq!(parse_line("gameover\n"), Command::GameOver);
+    }
+
+    #[test]
+    fn parses_clipstats_with_and_without_reset() {
+        assert_eq!(parse_line("clipstats"), Command::ClipStats(Vec::new()));
+        assert_eq!(
+            parse_line("clipstats reset\n"),
+            Command::ClipStats(vec!["reset".to_string()])
+        );
     }
 
     #[test]

@@ -296,6 +296,10 @@ pub(super) fn value_from_sums(net: &SymNetwork, acc: &Accumulator, stm: Color) -
     let mut second = [0.0f32; HIDDEN2];
     dense_clip(&net.w2, &net.b2, &hidden, &mut second);
 
+    // Reads the three arrays and writes nothing, so the value below is the one it would be.
+    #[cfg(feature = "clip_stats")]
+    super::clip_stats::record(&net.first, &features, &hidden, &second);
+
     // The value row's sum is the dense layers' too: eight lanes, as Manaka's is.
     net.value_b + dense::dot(&net.value_w, &second)
 }

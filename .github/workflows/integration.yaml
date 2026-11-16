@@ -158,6 +158,33 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The `clip_stats` feature is a measuring build: a counter in the head of a SYNN net, and the
+  # `clipstats` command that reads it. It is off in every build above, so nothing there compiles
+  # it; this is where it is built, linted and tested. Two shapes, as the matrices use: the power
+  # sums alone, and the one with a pair table, a second moment and a square field, which is every
+  # block the counter lays out. Only the two crates that hold it are tested: the rest of the
+  # workspace is the same code with the counter compiled out of it.
+  clip-stats:
+    name: clip_stats (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: synn-token
+            shape: synn_token_128x2_32_32
+          - name: synn-token-pair16-m8-f2
+            shape: synn_token_128x2_32_32_pair16_m8_f2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clip-stats-${{ matrix.name }}
+      - run: cargo clippy --workspace --all-targets --features ${{ matrix.shape }},clip_stats -- -D warnings
+      - run: cargo test -p attic-eval -p attic-protocol --features ${{ matrix.shape }},clip_stats
+      - run: cargo build --release -p attic --features ${{ matrix.shape }},clip_stats
+
   build:
     name: build (${{ matrix.name }})
     runs-on: ubuntu-latest

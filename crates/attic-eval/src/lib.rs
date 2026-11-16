@@ -59,6 +59,11 @@ pub use hce::{
     evaluate_with, load_network, load_network_with_warnings,
 };
 
+#[cfg(all(feature = "clip_stats", not(feature = "sym")))]
+compile_error!(
+    "`clip_stats` counts the head of a SYNN shape (`synn_*`); this shape has no counters"
+);
+
 pub use aligned::Aligned64;
 #[cfg(not(any(feature = "hce", feature = "sym_token")))]
 pub use features::{

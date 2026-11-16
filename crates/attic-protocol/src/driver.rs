@@ -333,6 +333,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
                 Command::GameOver => self.handle_gameover(),
                 Command::PonderHit => self.handle_ponderhit()?,
                 Command::Bench(tokens) => self.handle_bench(&tokens)?,
+                Command::ClipStats(tokens) => self.handle_clipstats(&tokens)?,
                 Command::Quit => {
                     self.finish_search_join();
                     return Ok(());
@@ -1326,6 +1327,36 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         self.info_string(&format!(
             "bench: positions={positions} nodes={total_nodes} time_ms={time_ms} nps={nps}"
         ))
+    }
+
+    /// `clipstats [reset]`: print the counts a `clip_stats` build keeps of how often each layer
+    /// of the head sat on its floor or ceiling, one `info string` for the net and one for each
+    /// layer, or zero them.
+    ///
+    /// The search is joined first, as `bench` does, so that what is read is a finished count and
+    /// not one a search thread is still adding to.
+    #[cfg(feature = "clip_stats")]
+    fn handle_clipstats(&mut self, tokens: &[String]) -> io::Result<()> {
+        self.finish_search_join();
+        match tokens {
+            [] => attic_search::clip_stats::summary()
+                .lines()
+                .iter()
+                .try_for_each(|line| self.info_string(line)),
+            [word] if word == "reset" => {
+                attic_search::clip_stats::reset();
+                self.info_string("clipstats: reset")
+            }
+            _ => self.info_string("clipstats: usage: clipstats [reset]"),
+        }
+    }
+
+    /// `clipstats` in a build with no counters: say how to get one, rather than answer as an
+    /// unknown command would.
+    #[cfg(not(feature = "clip_stats"))]
+    fn handle_clipstats(&mut self, _tokens: &[String]) -> io::Result<()> {
+        self.finish_search_join();
+        self.info_string("clipstats: this build does not count; build with --features clip_stats")
     }
 
     fn handle_stop(&mut self) {
