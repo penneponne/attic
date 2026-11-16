@@ -11,6 +11,8 @@
 //! the row's output as it is: there is no norm, no `tanh` and no unbounded
 //! activation anywhere in it.
 
+use std::cell::RefCell;
+
 use attic_state::Color;
 
 use super::dense;
@@ -283,25 +285,38 @@ pub(super) fn features_from_sums(
 /// output: a row of weights over activations that are themselves clipped to
 /// `[0, 1]`.
 pub(super) fn value_from_sums(net: &SymNetwork, acc: &Accumulator, stm: Color) -> f32 {
-    let mut features = [0.0f32; FEATURE_LEN];
-    features_from_sums(net, acc, stm, &mut features);
+    FEATURES.with_borrow_mut(|features| {
+        // An entry the blocks leave unwritten would be the last evaluation's here, and not the zero a fresh
+        // array has; a debug build makes it a NaN, which the value carries through to every test.
+        #[cfg(debug_assertions)]
+        features.fill(f32::NAN);
+        features_from_sums(net, acc, stm, features);
 
-    let mut hidden = [0.0f32; HIDDEN];
-    match &net.first {
-        FirstLayer::F32 => dense_clip(&net.w1, &net.b1, &features, &mut hidden),
-        FirstLayer::I16(q) => q.layer_clip(&features, &net.b1, &mut hidden),
-        FirstLayer::I8(q) => q.layer_clip(&features, &net.b1, &mut hidden),
-    }
+        let mut hidden = [0.0f32; HIDDEN];
+        match &net.first {
+            FirstLayer::F32 => dense_clip(&net.w1, &net.b1, features, &mut hidden),
+            FirstLayer::I16(q) => q.layer_clip(features, &net.b1, &mut hidden),
+            FirstLayer::I8(q) => q.layer_clip(features, &net.b1, &mut hidden),
+        }
 
-    let mut second = [0.0f32; HIDDEN2];
-    dense_clip(&net.w2, &net.b2, &hidden, &mut second);
+        let mut second = [0.0f32; HIDDEN2];
+        dense_clip(&net.w2, &net.b2, &hidden, &mut second);
 
-    // Reads the three arrays and writes nothing, so the value below is the one it would be.
-    #[cfg(feature = "clip_stats")]
-    super::clip_stats::record(&net.first, &features, &hidden, &second);
+        // Reads the three arrays and writes nothing, so the value below is the one it would be.
+        #[cfg(feature = "clip_stats")]
+        super::clip_stats::record(&net.first, features, &hidden, &second);
 
-    // The value row's sum is the dense layers' too: eight lanes, as Manaka's is.
-    net.value_b + dense::dot(&net.value_w, &second)
+        // The value row's sum is the dense layers' too: eight lanes, as Manaka's is.
+        net.value_b + dense::dot(&net.value_w, &second)
+    })
+}
+
+thread_local! {
+    /// The head's input, one buffer a thread. [`features_from_sums`] writes every entry, each block whole,
+    /// before anything reads it, so the buffer is not cleared between evaluations. A fresh array would be:
+    /// at this size the clear is a call to the C library's `memset`, musl's in the static build the lab
+    /// plays, and with the `i16` layer's own buffer it came to two percent of a node.
+    static FEATURES: RefCell<[f32; FEATURE_LEN]> = const { RefCell::new([0.0; FEATURE_LEN]) };
 }
 
 #[cfg(test)]
