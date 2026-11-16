@@ -18,6 +18,8 @@ use super::moment::touch_moment;
 use super::pair::{touch_pairs, touch_pairs_hm};
 #[cfg(feature = "sym_token")]
 use super::shape::HM;
+#[cfg(feature = "sym_token")]
+use super::shape::{HAS_FIELD, HAS_MOMENT, HAS_PAIR};
 use super::{DIM, FIELD_LEN, MOMENT_LEN, ORDER, PAIR, POWER_LEN, SymNetwork};
 
 /// What the pair sums are accumulated in. `f64`, which is not what the table is
@@ -400,10 +402,7 @@ impl Accumulator {
                 half.removed(),
                 half.added(),
             );
-            dst.pair[i].copy_from_slice(&src.pair[i]);
-            dst.moment[i].copy_from_slice(&src.moment[i]);
-            dst.field[i].copy_from_slice(&src.field[i]);
-            dst.active[i].clone_from(&src.active[i]);
+            dst.copy_sums_from(src, i);
         }
         let [black, white] = halves;
         dst.touch_tokens(net, black, white);
@@ -444,26 +443,26 @@ impl Accumulator {
         // The power sums, the moment and the field of the frames that hold their fold, from the parent in one
         // pass with the rows reflected if the frame is folded. A frame that rebuilds is written below.
         for (i, half) in halves.iter().enumerate() {
-            dst.pair[i].copy_from_slice(&src.pair[i]);
-            dst.moment[i].copy_from_slice(&src.moment[i]);
-            dst.field[i].copy_from_slice(&src.field[i]);
-            dst.active[i].clone_from(&src.active[i]);
+            dst.copy_sums_from(src, i);
             if rebuild[i] {
                 continue;
             }
-            let fold = |token: FeatureIndex| {
-                if src.folded[i] {
-                    mirror_row(token)
-                } else {
-                    token
-                }
-            };
+            if !src.folded[i] {
+                accumulate(
+                    &src.sums[i],
+                    &mut dst.sums[i],
+                    &net.embed,
+                    half.removed(),
+                    half.added(),
+                );
+                continue;
+            }
             let (mut removed, mut added) = ([0 as FeatureIndex; 2], [0 as FeatureIndex; 2]);
             for (slot, &token) in removed.iter_mut().zip(half.removed()) {
-                *slot = fold(token);
+                *slot = mirror_row(token);
             }
             for (slot, &token) in added.iter_mut().zip(half.added()) {
-                *slot = fold(token);
+                *slot = mirror_row(token);
             }
             accumulate(
                 &src.sums[i],
@@ -560,6 +559,29 @@ impl Accumulator {
                 );
             }
         }
+    }
+
+    /// Frame `i`'s pair, moment and field sums and its tokens, copied from `src`'s.
+    ///
+    /// The sums are copied at the lengths the shape fixes, and a table the shape does not have is not
+    /// touched, so that each copy is a few moves of a known size. Copied at the `Vec`s' own lengths, each is
+    /// a call to the C library's `memcpy`, a length of zero included, and in the static build that is
+    /// musl's: a few calls a derive came to more of a node's time than the derive's arithmetic.
+    fn copy_sums_from(&mut self, src: &Accumulator, i: usize) {
+        fn copy<T: Copy, const N: usize>(dst: &mut [T], src: &[T]) {
+            let dst: &mut [T; N] = dst.try_into().expect("a sum is the length the shape fixes");
+            *dst = *<&[T; N]>::try_from(src).expect("a sum is the length the shape fixes");
+        }
+        if HAS_PAIR {
+            copy::<_, PAIR>(&mut self.pair[i], &src.pair[i]);
+        }
+        if HAS_MOMENT {
+            copy::<_, MOMENT_LEN>(&mut self.moment[i], &src.moment[i]);
+        }
+        if HAS_FIELD {
+            copy::<_, FIELD_LEN>(&mut self.field[i], &src.field[i]);
+        }
+        self.active[i].clone_from(&src.active[i]);
     }
 
     /// The tokens of the black frame, unreflected, given the lists of both: frame `i`'s own list when `i` is the
