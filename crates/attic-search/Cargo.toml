@@ -59,6 +59,9 @@ hce = []
 # of `qsearch` and start each `go` with `callsCnt` at 0. For comparing against
 # YaneuraOu only; the default keeps the earlier abort latency.
 ref_check_time = []
+# A measuring build: count how often each layer of a SYNN head is on its floor or ceiling,
+# and answer the `clipstats` command with it. Pass-through to `attic-eval`.
+clip_stats = ["attic-eval/clip_stats"]
 
 [dev-dependencies]
 serde = { version = "~1.0", features = ["derive"] }

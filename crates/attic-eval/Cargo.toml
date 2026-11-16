@@ -67,6 +67,10 @@ nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
 #   hce                  every hand-crafted shape. Unlike the others it also
 #                        stands for them in the guard's pairwise lists, because
 #                        an HCE shape is exactly what `hce` being on means.
+# Count how often each layer of a SYNN head sits on its floor or ceiling, and answer the
+# `clipstats` command with it. A measuring build: the counters are atomics added to on every
+# evaluation, and a build without the feature has none of them. See `manaka/clip_stats.rs`.
+clip_stats = []
 sfnn = []
 sfnn_progress = ["sfnn"]
 sfnn_progress_ek = ["sfnn_progress"]
@@ -155,6 +159,10 @@ required-features = ["sym"]
 [[example]]
 name = "nnue_dump"
 required-features = ["nnue_standard"]
+
+[[example]]
+name = "clip_dump"
+required-features = ["clip_stats"]
 
 [dev-dependencies]
 proptest = "~1.11"

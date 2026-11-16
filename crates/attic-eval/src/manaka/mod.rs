@@ -88,6 +88,8 @@
 mod accumulator;
 mod body;
 mod cache;
+#[cfg(feature = "clip_stats")]
+pub mod clip_stats;
 mod dense;
 #[cfg(feature = "sym_token")]
 mod field;
