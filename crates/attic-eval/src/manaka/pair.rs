@@ -10,7 +10,7 @@ use crate::tokens::FeatureIndex;
 use super::accumulator::PairSum;
 use super::pair_i8::{cube_totals, scaled_totals};
 use super::pair_table::{Cells, ROW};
-use super::{PAIR, PAIR_ROWS, PairTable, SymNetwork, TOKENS};
+use super::{PAIR, PAIR_ROWS, SymNetwork, TOKENS};
 
 /// The row of the pair `{a, b}` in the pair table.
 ///
@@ -155,7 +155,7 @@ const _: () = assert!(
 ///
 /// `token` and `others` are numbered as the black frame numbers them, and
 /// `sums` is `[black, white]`. A row of the table holds both frames' channels for
-/// the pair (see [`PairTable`]), so the white frame's sum comes from the same
+/// the pair (see [`PairTable`](super::PairTable)), so the white frame's sum comes from the same
 /// reads. That is the white frame's own computation and not an approximation of
 /// it: the white frame's tokens are the black frame's through `other_frame`, in
 /// the same order (`tokens.rs`), so the rows it would read and the order it
@@ -182,7 +182,7 @@ pub(super) fn touch_pairs(
     if PAIR == 0 {
         return;
     }
-    let totals = row_totals(&net.pair, token, others);
+    let totals = row_totals(net.pair.cells(), token, others);
     for (frame, sum) in sums.iter_mut().enumerate() {
         add_frame(sum, &totals, frame, sign);
     }
@@ -212,10 +212,13 @@ fn add_frame(sum: &mut [PairSum], totals: &[f32; ROW], frame: usize, sign: PairS
 /// again. The white half of that row is `T(other m(a), other m(b))`, which is the pair the white frame
 /// reads once it has reflected its own tokens (`m(other(a)) = other(m(a))`).
 ///
-/// Both frames folded alike, and both updated, take one read, as the unfolded path does, with `token` and
-/// `others` reflected together. Otherwise each frame updated takes a read of its own, of which only its
-/// half is used. The sums are accumulated in the order [`touch_pairs`] gives, so a position none of whose
-/// frames fold is the same bits it always was.
+/// Every fold reads one row a pair for both frames. Frames folded alike read the table at the tokens, or
+/// at the tokens reflected; frames folded differently read the second table
+/// ([`PairTable::mixed_cells`](super::PairTable::mixed_cells)), whose row `{a, b}` is the black half of `{m(a), m(b)}` and the white half
+/// of `{a, b}`: at the tokens when black is the one folded, and at the tokens reflected when white is.
+/// Each half is the half the frame's own read would give, from the same rows in the same order, so the
+/// sums are the bits they would be if each frame read its rows alone, and a position none of whose frames
+/// fold is the same bits it always was.
 #[inline]
 pub(super) fn touch_pairs_hm(
     sums: &mut [Vec<PairSum>; 2],
@@ -231,36 +234,24 @@ pub(super) fn touch_pairs_hm(
     if PAIR == 0 || !(update[0] || update[1]) {
         return;
     }
-    let mut buffer = [0 as FeatureIndex; MAX_ACTIVE_FEATURES];
-    // `others` reflected into `buffer`, and how many there are.
-    fn reflect_into(
-        others: &[FeatureIndex],
-        buffer: &mut [FeatureIndex; MAX_ACTIVE_FEATURES],
-    ) -> usize {
+    let (cells, reflect) = match folded {
+        [false, false] => (net.pair.cells(), false),
+        [true, true] => (net.pair.cells(), true),
+        [true, false] => (net.pair.mixed_cells(), false),
+        [false, true] => (net.pair.mixed_cells(), true),
+    };
+    let totals = if reflect {
+        let mut buffer = [0 as FeatureIndex; MAX_ACTIVE_FEATURES];
         for (slot, &other) in buffer.iter_mut().zip(others) {
             *slot = mirror_row(other);
         }
-        others.len()
-    }
-    match (folded, update) {
-        ([false, false], [true, true]) => touch_pairs(sums, net, token, others, sign),
-        ([true, true], [true, true]) => {
-            let count = reflect_into(others, &mut buffer);
-            touch_pairs(sums, net, mirror_row(token), &buffer[..count], sign);
-        }
-        _ => {
-            for frame in 0..2 {
-                if !update[frame] {
-                    continue;
-                }
-                let totals = if folded[frame] {
-                    let count = reflect_into(others, &mut buffer);
-                    row_totals(&net.pair, mirror_row(token), &buffer[..count])
-                } else {
-                    row_totals(&net.pair, token, others)
-                };
-                add_frame(&mut sums[frame], &totals, frame, sign);
-            }
+        row_totals(cells, mirror_row(token), &buffer[..others.len()])
+    } else {
+        row_totals(cells, token, others)
+    };
+    for (frame, sum) in sums.iter_mut().enumerate() {
+        if update[frame] {
+            add_frame(sum, &totals, frame, sign);
         }
     }
 }
@@ -268,9 +259,13 @@ pub(super) fn touch_pairs_hm(
 /// The rows of `token` against each of `others`, both frames' channels, added up
 /// in the order [`touch_pairs`] gives.
 #[inline]
-fn row_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) -> [f32; ROW] {
-    match table.cells() {
-        Cells::Halves(_) => half_totals(table, token, others),
+pub(super) fn row_totals(
+    cells: &Cells,
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+) -> [f32; ROW] {
+    match cells {
+        Cells::Halves(halves) => half_totals(halves, token, others),
         // The two byte tables add their rows in the same order; see `pair_i8.rs`.
         Cells::Cubes { q, scale } => cube_totals(q, scale, token, others),
         Cells::Scaled { q } => scaled_totals(q, token, others),
@@ -279,7 +274,7 @@ fn row_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) -
 
 /// [`row_totals`] for the table as the file has it, halves.
 #[inline]
-fn half_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) -> [f32; ROW] {
+fn half_totals(halves: &[u16], token: FeatureIndex, others: &[FeatureIndex]) -> [f32; ROW] {
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
@@ -288,7 +283,7 @@ fn half_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) 
     {
         // SAFETY: the `cfg` above is the build enabling AVX2 and F16C for the CPU
         // it runs on.
-        unsafe { row_totals_avx2(table, token, others) }
+        unsafe { row_totals_avx2(halves, token, others) }
     }
     #[cfg(not(all(
         target_arch = "x86_64",
@@ -296,7 +291,7 @@ fn half_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) 
         target_feature = "f16c"
     )))]
     {
-        row_totals_scalar(table, token, others)
+        row_totals_scalar(halves, token, others)
     }
 }
 
@@ -311,13 +306,12 @@ fn half_totals(table: &PairTable, token: FeatureIndex, others: &[FeatureIndex]) 
     ))
 ))]
 pub(super) fn row_totals_scalar(
-    table: &PairTable,
+    halves: &[u16],
     token: FeatureIndex,
     others: &[FeatureIndex],
 ) -> [f32; ROW] {
     use super::reader::half_to_f32;
 
-    let halves = table.halves();
     let row = |other: FeatureIndex| -> &[u16] {
         let at = pair_row(token, other) * ROW;
         &halves[at..at + ROW]
@@ -359,14 +353,13 @@ pub(super) fn row_totals_scalar(
 ))]
 #[target_feature(enable = "avx2,f16c")]
 pub(super) unsafe fn row_totals_avx2(
-    table: &PairTable,
+    halves: &[u16],
     token: FeatureIndex,
     others: &[FeatureIndex],
 ) -> [f32; ROW] {
     use std::arch::x86_64::*;
 
     const GROUPS: usize = ROW / LANES;
-    let halves = table.halves();
     // Every row read is `pair_row(token, other)`, which is below `PAIR_ROWS`, and
     // the table is that many rows long.
     assert_eq!(halves.len(), PAIR_ROWS * ROW);
