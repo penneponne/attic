@@ -190,6 +190,59 @@ pub(crate) const fn other_frame(row: FeatureIndex) -> FeatureIndex {
     other as FeatureIndex
 }
 
+/// A token's row when the board is mirrored left to right: the same class (kind and owner) on the
+/// square across the board, and a hand row as it is, for a hand is a count of what is held and not a
+/// place.
+///
+/// A square is `file_index · 9 + rank_index` in Manaka's numbering (file index 0 the ninth file), so
+/// the reflection reverses the file index and keeps the rank. It is an involution, and it commutes
+/// with [`other_frame`] (the 180° turn reverses the whole square number, which is the file reversed
+/// and the rank reversed): reflecting a frame's tokens and turning them to the other frame give the
+/// same row in either order. That commutation is what lets the pair table, which holds a pair's two
+/// frames in one row, be read for one frame folded and the other not.
+///
+/// Mirrors `manaka_core::token::MIRROR`.
+#[inline]
+pub(crate) const fn mirror_row(row: FeatureIndex) -> FeatureIndex {
+    let row = row as usize;
+    if row < BOARD_ROWS {
+        let (class, square) = (row / SQUARES, row % SQUARES);
+        (class * SQUARES + (8 - square / 9) * 9 + square % 9) as FeatureIndex
+    } else {
+        row as FeatureIndex
+    }
+}
+
+/// First row of a frame's own king: kind 7 (the king), ours (`theirs` 0), square 0.
+pub(crate) const OWN_KING_FIRST: FeatureIndex = (7 * 2 * SQUARES) as FeatureIndex;
+
+/// The file index (0 the ninth file, as the frame's own side reads the board) below which `hm` folds
+/// a frame: files 6 to 9.
+const HM_FOLD_BELOW: usize = 4;
+
+/// Whether a frame whose own king stands on `row` is read mirrored (`hm`): the king is on the sixth to
+/// ninth file. `row` is a king row of the frame (see [`OWN_KING_FIRST`]).
+#[inline]
+pub(crate) const fn folds_for_king(row: FeatureIndex) -> bool {
+    (row - OWN_KING_FIRST) as usize / 9 < HM_FOLD_BELOW
+}
+
+/// Whether `row` is the frame's own king.
+#[inline]
+pub(crate) const fn is_own_king(row: FeatureIndex) -> bool {
+    row >= OWN_KING_FIRST && row < OWN_KING_FIRST + SQUARES as FeatureIndex
+}
+
+/// Whether a frame holding `tokens` (as the frame numbers them, unfolded) is read mirrored: its own
+/// king is among them and on the sixth to ninth file. A list without an own king, which only a
+/// hand-built test position has, is not folded.
+#[inline]
+pub(crate) fn folds(tokens: &[FeatureIndex]) -> bool {
+    tokens
+        .iter()
+        .any(|&row| is_own_king(row) && folds_for_king(row))
+}
+
 /// Every token of `pos` as `frame` reads it: one per board piece in square
 /// order, then one per held piece. A legal position gives exactly
 /// [`MAX_ACTIVE_FEATURES`] of them.

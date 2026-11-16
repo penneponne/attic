@@ -165,6 +165,61 @@ pub(super) fn random_game(seed: u64, plies: usize) -> Vec<(Position, Move)> {
     line
 }
 
+/// A game in which the kings are walked across the line between the fifth and sixth files and back.
+///
+/// A random game keeps both kings near home: they cross that line (where an `hm` net changes how a whole
+/// frame is read) almost never. Here, on each ply, if the side to move has a king step that crosses the
+/// line it is played with probability `cross`, otherwise any king step with probability `walk`, and
+/// otherwise a random legal move; the game is still the same line for a given `seed`.
+#[cfg(feature = "sym_hm")]
+pub(super) fn king_walk_game(
+    seed: u64,
+    plies: usize,
+    cross: f64,
+    walk: f64,
+) -> Vec<(Position, Move)> {
+    use attic_state::PieceKind;
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    let mut pos = Position::startpos();
+    let mut line = Vec::new();
+    let mut legal = Vec::new();
+    // `index / 9` runs 0 to 8 across the board and the fifth file is 4. A king is folded by its owner's view,
+    // which for black is `index / 9 < 4` and for white is the board turned, `index / 9 > 4`; either way the
+    // line is between 4 and its neighbour on one side, so a step that changes `index / 9` between `<= 4` and
+    // `> 4`, or between `< 4` and `>= 4`, crosses it for one of the two colours. Taking a step to or from
+    // file 4 (the fifth) covers both.
+    let side = |index: u8| (index / 9).cmp(&4);
+    for _ in 0..plies {
+        legal.clear();
+        pos.generate_legal_all(&mut legal);
+        if legal.is_empty() {
+            break;
+        }
+        let kings: Vec<Move> = legal
+            .iter()
+            .copied()
+            .filter(|mv| !mv.is_drop() && mv.moved_piece_after().kind == PieceKind::King)
+            .collect();
+        let crossing: Vec<Move> = kings
+            .iter()
+            .copied()
+            .filter(|mv| side(mv.from_sq().index()) != side(mv.to_sq().index()))
+            .collect();
+        let draw = rng.below(1000) as f64 / 1000.0;
+        let mv = if !crossing.is_empty() && draw < cross {
+            crossing[rng.below(crossing.len())]
+        } else if !kings.is_empty() && draw < cross + walk {
+            kings[rng.below(kings.len())]
+        } else {
+            legal[rng.below(legal.len())]
+        };
+        line.push((pos.clone(), mv));
+        let _ = pos.do_move(mv);
+    }
+    line
+}
+
 /// A small deterministic generator (xorshift64*), so a failure is the same
 /// failure on every run and every machine.
 struct Rng(u64);
@@ -218,6 +273,59 @@ pub(super) fn tokens_present(pos: &Position, frame: attic_state::Color) -> Vec<u
         }
     }
     tokens
+}
+
+/// The tokens of `frame` as an `hm` net reads them, written out a different way from the accumulator: when
+/// `frame`'s own king stands on the sixth to ninth file as that frame's owner counts them, the *board is
+/// mirrored left to right* — every piece moved to the square across the board, hands left alone — and the
+/// tokens of that board are listed as ever. No token table's reflection is used: a mirror of the position
+/// is built and numbered by [`tokens_present`], so a wrong `mirror_row` cannot agree with this.
+#[cfg(feature = "sym_hm")]
+pub(super) fn tokens_present_hm(pos: &Position, frame: attic_state::Color) -> Vec<u32> {
+    use attic_state::{Color, Square};
+
+    let king_file = |frame: Color| -> Option<usize> {
+        for index in 0..Square::COUNT as u8 {
+            let sq = Square::from_index(index).expect("a square");
+            if let Some(piece) = pos.board().get(sq)
+                && piece.kind == attic_state::PieceKind::King
+                && piece.color == frame
+            {
+                // The file the owner counts, 1 to 9: a square's file as written is `index / 9 + 1`, and the
+                // white frame reads the board turned half way round.
+                let written = usize::from(index) / 9 + 1;
+                return Some(if frame == Color::Black {
+                    written
+                } else {
+                    10 - written
+                });
+            }
+        }
+        None
+    };
+    // `index / 9 + 1` is the file in YaneuraOu's numbering (file 1 is index 0..9); a king on file `f` as
+    // written is on the sixth to ninth file when `f >= 6`.
+    if !king_file(frame).is_some_and(|file| file >= 6) {
+        return tokens_present(pos, frame);
+    }
+    let mut mirrored = Position::empty();
+    for index in 0..Square::COUNT as u8 {
+        let sq = Square::from_index(index).expect("a square");
+        if let Some(piece) = pos.board().get(sq) {
+            // Same rank, opposite file: in YaneuraOu's numbering `index = (file - 1) * 9 + (rank - 1)`.
+            let across = Square::from_index((8 - index / 9) * 9 + index % 9).expect("a square");
+            mirrored.board_mut().set(across, Some(piece));
+        }
+    }
+    for color in [Color::Black, Color::White] {
+        for kind in crate::tokens::HAND_KINDS {
+            for _ in 0..pos.hand(color).count(kind) {
+                mirrored.hand_mut(color).increment(kind);
+            }
+        }
+    }
+    mirrored.set_side_to_move(pos.side_to_move());
+    tokens_present(&mirrored, frame)
 }
 
 /// The KP and HalfKP shapes number a position's features in the one place there

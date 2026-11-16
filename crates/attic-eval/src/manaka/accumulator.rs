@@ -15,7 +15,9 @@ use super::field::touch_field;
 #[cfg(feature = "sym_token")]
 use super::moment::touch_moment;
 #[cfg(feature = "sym_token")]
-use super::pair::touch_pairs;
+use super::pair::{touch_pairs, touch_pairs_hm};
+#[cfg(feature = "sym_token")]
+use super::shape::HM;
 use super::{DIM, FIELD_LEN, MOMENT_LEN, ORDER, PAIR, POWER_LEN, SymNetwork};
 
 /// What the pair sums are accumulated in. `f64`, which is not what the table is
@@ -106,6 +108,12 @@ pub struct Accumulator {
     /// rebuilt from the position.
     #[cfg(feature = "sym_token")]
     active: [Vec<FeatureIndex>; Color::COUNT],
+    /// Whether each frame is read mirrored (`hm`): its own king is on the sixth to ninth file. The sums above
+    /// are those of the tokens `active` holds *after* this reflection, and `active` itself is kept as the
+    /// frame numbers its tokens, unreflected, so that a frame that has to be built again (its king crossed the
+    /// fifth file) is built from what is on the board. Always `false` in a build without `hm`.
+    #[cfg(feature = "sym_token")]
+    folded: [bool; Color::COUNT],
 }
 
 impl Default for Accumulator {
@@ -126,6 +134,8 @@ impl Accumulator {
                 Vec::with_capacity(MAX_ACTIVE_FEATURES),
                 Vec::with_capacity(MAX_ACTIVE_FEATURES),
             ],
+            #[cfg(feature = "sym_token")]
+            folded: [false; Color::COUNT],
         }
     }
 
@@ -137,27 +147,63 @@ impl Accumulator {
         for color in [Color::Black, Color::White] {
             let i = color.index();
             let features = active_features(pos, color);
-            accumulate(&ZERO_SUMS, &mut self.sums[i], &net.embed, &[], &features);
-            self.pair[i].fill(0.0);
-            self.moment[i].fill(0.0);
-            self.field[i].fill(0.0);
             #[cfg(feature = "sym_token")]
             {
-                for &feature in &features {
-                    touch_moment(&mut self.moment[i], net, feature, 1.0);
-                    touch_field(&mut self.field[i], net, feature, 1.0);
-                }
+                self.folded[i] = HM && crate::tokens::folds(&features);
+                self.pair[i].fill(0.0);
+                self.moment[i].fill(0.0);
+                self.field[i].fill(0.0);
+                self.sum_frame(net, i, &features);
                 self.active[i] = features;
+            }
+            #[cfg(not(feature = "sym_token"))]
+            {
+                accumulate(&ZERO_SUMS, &mut self.sums[i], &net.embed, &[], &features);
+                self.pair[i].fill(0.0);
+                self.moment[i].fill(0.0);
+                self.field[i].fill(0.0);
             }
         }
         // Every pair once, each token against the ones before it, both frames at
         // once from the black frame's list.
         #[cfg(feature = "sym_token")]
         {
-            let black = &self.active[Color::Black.index()];
+            let black = std::mem::take(&mut self.active[Color::Black.index()]);
+            let folded = self.folded;
             for at in 0..black.len() {
-                touch_pairs(&mut self.pair, net, black[at], &black[..at], 1.0);
+                touch_pairs_hm(
+                    &mut self.pair,
+                    net,
+                    black[at],
+                    &black[..at],
+                    1.0,
+                    folded,
+                    [true, true],
+                );
             }
+            self.active[Color::Black.index()] = black;
+        }
+    }
+
+    /// The power sums, the second moment and the square field of frame `i` built from `tokens`, as that
+    /// frame numbers them and unreflected: the frame's fold (`self.folded[i]`) is applied here, so that every
+    /// caller states what is on the board and this decides which rows that is. The pair sum is not touched;
+    /// it is over pairs and is the callers' to build, in the order they need.
+    #[cfg(feature = "sym_token")]
+    fn sum_frame(&mut self, net: &SymNetwork, i: usize, tokens: &[FeatureIndex]) {
+        let mut buffer = [0 as FeatureIndex; MAX_ACTIVE_FEATURES];
+        let rows: &[FeatureIndex] = if self.folded[i] {
+            for (slot, &token) in buffer.iter_mut().zip(tokens) {
+                *slot = crate::tokens::mirror_row(token);
+            }
+            &buffer[..tokens.len()]
+        } else {
+            tokens
+        };
+        accumulate(&ZERO_SUMS, &mut self.sums[i], &net.embed, &[], rows);
+        for &row in rows {
+            touch_moment(&mut self.moment[i], net, row, 1.0);
+            touch_field(&mut self.field[i], net, row, 1.0);
         }
     }
 
@@ -184,6 +230,12 @@ impl Accumulator {
     /// empty without one. Rounded to `f32` from the `f64` it is accumulated in.
     pub fn field(&self, color: Color) -> [f32; FIELD_LEN] {
         std::array::from_fn(|at| self.field[color.index()][at] as f32)
+    }
+
+    /// Which frames are read mirrored; the tests state what the fold did from this.
+    #[cfg(all(test, feature = "sym_hm"))]
+    pub(super) fn folded_for_test(&self) -> [bool; Color::COUNT] {
+        self.folded
     }
 
     /// The tokens present in one perspective, in no particular order.
@@ -333,6 +385,10 @@ impl Accumulator {
     ) {
         let halves = [Color::Black, Color::White]
             .map(|color| delta.half(color).expect("a token delta is never a rebuild"));
+        if HM {
+            Self::derive_hm(src, dst, net, &halves);
+            return;
+        }
         for (i, half) in halves.iter().enumerate() {
             // The power sums depend on nothing but the rows being taken out and put
             // in, and in what order, so they go in one pass ahead of the tables that
@@ -353,6 +409,172 @@ impl Accumulator {
         dst.touch_tokens(net, black, white);
     }
 
+    /// [`Self::derive_into_cached`] for a net read with `hm`.
+    ///
+    /// Each frame is read in its own fold, mirrored when its own king is on the sixth to ninth file, and a
+    /// move can change that for one frame and not the other. A frame whose fold holds still is derived as
+    /// ever, except that the rows it takes out and puts in are the reflected ones if it is folded. A frame
+    /// whose own king crossed the line between the fifth file and the sixth is read the other way now, which
+    /// changes every board token of it, so it is built again from the tokens on the board after the move:
+    /// forty rows of the embedding, the same of the moment and the field, and its pair sum over the 780 pairs.
+    /// That is a little over one derive in forty (`1.3%` of the frames' derives in play), and every other
+    /// derive is the incremental update it was.
+    ///
+    /// The set of tokens `active` is the board as each frame numbers it, never reflected; the reflection is
+    /// applied where the rows are read.
+    fn derive_hm(
+        src: &Accumulator,
+        dst: &mut Accumulator,
+        net: &SymNetwork,
+        halves: &[&PerspectiveDelta; Color::COUNT],
+    ) {
+        use crate::tokens::{folds_for_king, is_own_king, mirror_row};
+
+        // The fold of each frame after the move: an own king among the tokens it gains says where it
+        // stands now, and a frame that gains none keeps the fold it had.
+        let mut rebuild = [false; Color::COUNT];
+        for (i, half) in halves.iter().enumerate() {
+            dst.folded[i] = src.folded[i];
+            if let Some(&king) = half.added().iter().find(|&&token| is_own_king(token)) {
+                dst.folded[i] = folds_for_king(king);
+            }
+            rebuild[i] = dst.folded[i] != src.folded[i];
+        }
+
+        // The power sums, the moment and the field of the frames that hold their fold, from the parent in one
+        // pass with the rows reflected if the frame is folded. A frame that rebuilds is written below.
+        for (i, half) in halves.iter().enumerate() {
+            dst.pair[i].copy_from_slice(&src.pair[i]);
+            dst.moment[i].copy_from_slice(&src.moment[i]);
+            dst.field[i].copy_from_slice(&src.field[i]);
+            dst.active[i].clone_from(&src.active[i]);
+            if rebuild[i] {
+                continue;
+            }
+            let fold = |token: FeatureIndex| {
+                if src.folded[i] {
+                    mirror_row(token)
+                } else {
+                    token
+                }
+            };
+            let (mut removed, mut added) = ([0 as FeatureIndex; 2], [0 as FeatureIndex; 2]);
+            for (slot, &token) in removed.iter_mut().zip(half.removed()) {
+                *slot = fold(token);
+            }
+            for (slot, &token) in added.iter_mut().zip(half.added()) {
+                *slot = fold(token);
+            }
+            accumulate(
+                &src.sums[i],
+                &mut dst.sums[i],
+                &net.embed,
+                &removed[..half.removed().len()],
+                &added[..half.added().len()],
+            );
+        }
+
+        // The tokens, the pair sums and the moment and field of the frames that hold their fold, token by
+        // token as in the unfolded derive: each removal leaves `active` before its pairs are taken out, and
+        // each addition enters it after its pairs are put in.
+        let keep = [!rebuild[0], !rebuild[1]];
+        let (black, white) = (halves[0], halves[1]);
+        let (b, w) = (Color::Black.index(), Color::White.index());
+        for (&token, &other) in black.removed().iter().zip(white.removed()) {
+            for (i, token) in [(b, token), (w, other)] {
+                let at = position_of(&dst.active[i], token)
+                    .expect("a removed token was not in the accumulator it is removed from");
+                dst.active[i].swap_remove(at);
+            }
+            touch_pairs_hm(
+                &mut dst.pair,
+                net,
+                token,
+                &dst.active[b],
+                -1.0,
+                src.folded,
+                keep,
+            );
+            for (i, token) in [(b, token), (w, other)] {
+                if keep[i] {
+                    let row = if src.folded[i] {
+                        mirror_row(token)
+                    } else {
+                        token
+                    };
+                    touch_moment(&mut dst.moment[i], net, row, -1.0);
+                    touch_field(&mut dst.field[i], net, row, -1.0);
+                }
+            }
+        }
+        for (&token, &other) in black.added().iter().zip(white.added()) {
+            touch_pairs_hm(
+                &mut dst.pair,
+                net,
+                token,
+                &dst.active[b],
+                1.0,
+                src.folded,
+                keep,
+            );
+            for (i, token) in [(b, token), (w, other)] {
+                if keep[i] {
+                    let row = if src.folded[i] {
+                        mirror_row(token)
+                    } else {
+                        token
+                    };
+                    touch_moment(&mut dst.moment[i], net, row, 1.0);
+                    touch_field(&mut dst.field[i], net, row, 1.0);
+                }
+                dst.active[i].push(token);
+            }
+        }
+
+        // A frame whose fold changed is built again from the board it now reads.
+        for i in 0..Color::COUNT {
+            if !rebuild[i] {
+                continue;
+            }
+            dst.pair[i].fill(0.0);
+            dst.moment[i].fill(0.0);
+            dst.field[i].fill(0.0);
+            let tokens = std::mem::take(&mut dst.active[i]);
+            dst.sum_frame(net, i, &tokens);
+            dst.active[i] = tokens;
+            // This frame's pair sum, over every pair once and the black frame's list read in this frame's
+            // numbering: the black list when this is the black frame, and the white list turned back to it
+            // when it is the white (`touch_pairs_hm` reads the table in the black frame's numbering).
+            let black_list = Self::black_list_of(&dst.active, i);
+            let mut update = [false; Color::COUNT];
+            update[i] = true;
+            for at in 0..black_list.len() {
+                touch_pairs_hm(
+                    &mut dst.pair,
+                    net,
+                    black_list[at],
+                    &black_list[..at],
+                    1.0,
+                    dst.folded,
+                    update,
+                );
+            }
+        }
+    }
+
+    /// The tokens of the black frame, unreflected, given the lists of both: frame `i`'s own list when `i` is the
+    /// black frame, and the white list read through `other_frame` when it is the white. A frame that rebuilds
+    /// its pair sum reads the table in the black frame's numbering whichever frame it is.
+    fn black_list_of(active: &[Vec<FeatureIndex>; Color::COUNT], i: usize) -> Vec<FeatureIndex> {
+        match i {
+            0 => active[0].clone(),
+            _ => active[1]
+                .iter()
+                .map(|&token| crate::tokens::other_frame(token))
+                .collect(),
+        }
+    }
+
     /// The pair, moment and field sums and the sets of tokens of both halves,
     /// taken from what they hold to the position after the move. The power sums
     /// are not touched.
@@ -369,9 +591,7 @@ impl Accumulator {
         let (b, w) = (Color::Black.index(), Color::White.index());
         for (&token, &other) in black.removed().iter().zip(white.removed()) {
             for (i, token) in [(b, token), (w, other)] {
-                let at = self.active[i]
-                    .iter()
-                    .position(|&present| present == token)
+                let at = position_of(&self.active[i], token)
                     .expect("a removed token was not in the accumulator it is removed from");
                 self.active[i].swap_remove(at);
             }
@@ -390,6 +610,51 @@ impl Accumulator {
             }
         }
     }
+}
+
+/// Where `token` is in `list`, the first place it is: what `iter().position` finds,
+/// eight entries at a time. A position has each token once, so there is no second
+/// place to be told apart from.
+#[cfg(feature = "sym_token")]
+#[inline]
+fn position_of(list: &[FeatureIndex], token: FeatureIndex) -> Option<usize> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        unsafe { position_of_avx2(list, token) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        list.iter().position(|&present| present == token)
+    }
+}
+
+/// [`position_of`] on AVX2: a compare of eight entries and a mask for each whole
+/// group, then the entries after the last whole group one at a time.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(feature = "sym_token", target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn position_of_avx2(list: &[FeatureIndex], token: FeatureIndex) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    let needle = _mm256_set1_epi32(token as i32);
+    let mut at = 0;
+    while at + 8 <= list.len() {
+        // SAFETY: `at + 8 <= list.len()`; the load is unaligned.
+        let group = unsafe { _mm256_loadu_si256(list.as_ptr().add(at).cast()) };
+        let hits = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(group, needle)));
+        if hits != 0 {
+            return Some(at + hits.trailing_zeros() as usize);
+        }
+        at += 8;
+    }
+    list[at..]
+        .iter()
+        .position(|&present| present == token)
+        .map(|place| at + place)
 }
 
 /// What a half's power sums start from when they are built rather than derived.
@@ -417,6 +682,117 @@ static ZERO_SUMS: [f32; POWER_LEN] = [0.0; POWER_LEN];
 /// `ORDER` — so the sums are the same bits as copying `src` and updating it in
 /// place.
 fn accumulate(
+    src: &[f32],
+    dst: &mut [f32],
+    embed: &[f32],
+    removed: &[FeatureIndex],
+    added: &[FeatureIndex],
+) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        unsafe { accumulate_avx2(src, dst, embed, removed, added) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        accumulate_groups(src, dst, embed, removed, added);
+    }
+}
+
+/// How many groups of eight channels [`accumulate_avx2`] carries through the
+/// features at once: as many as keep their `ORDER` sums, and the row being added, in
+/// the sixteen registers, and a whole number of them to a row. Eight for the first
+/// order, whose sums are one register a group, and fewer for the higher ones.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+const TILE: usize = {
+    let groups = DIM / 8;
+    let mut tile = if 8 / ORDER > 0 { 8 / ORDER } else { 1 };
+    while !groups.is_multiple_of(tile) {
+        tile -= 1;
+    }
+    tile
+};
+
+/// [`accumulate_groups`] with a tile of groups taken through the features together,
+/// so that a feature's row is found once for the tile where the group at a time
+/// finds it again for every group, and the vector instructions are the whole of the
+/// loop's body.
+///
+/// A channel sees what it always saw — for each feature in order, `sums_k += sign ·
+/// v^k` and then the power raised by one more multiplication by `v`, `k` from one to
+/// `ORDER` — and channels do not read each other, so the sums are the same bits.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn accumulate_avx2(
+    src: &[f32],
+    dst: &mut [f32],
+    embed: &[f32],
+    removed: &[FeatureIndex],
+    added: &[FeatureIndex],
+) {
+    use std::arch::x86_64::*;
+
+    const LANES: usize = 8;
+    assert_eq!(src.len(), ORDER * DIM);
+    assert_eq!(dst.len(), ORDER * DIM);
+    // Every row read is `feature · DIM` in, `DIM` long; the check is once per
+    // feature and not once per group.
+    for &feature in removed.iter().chain(added) {
+        assert!(
+            (feature as usize + 1) * DIM <= embed.len(),
+            "a feature is a row of the embedding"
+        );
+    }
+    for tile in (0..DIM / LANES).step_by(TILE) {
+        let at = tile * LANES;
+        // `sums[t][k]`: group `t` of the tile, order `k + 1`.
+        let mut sums = [[_mm256_setzero_ps(); ORDER]; TILE];
+        for (t, group) in sums.iter_mut().enumerate() {
+            for (k, slot) in group.iter_mut().enumerate() {
+                // SAFETY: `k · DIM + at + t · 8 + 8 <= ORDER · DIM`, which is what
+                // `src` holds (asserted above); the load is unaligned.
+                *slot = unsafe { _mm256_loadu_ps(src.as_ptr().add(k * DIM + at + t * LANES)) };
+            }
+        }
+        for (features, subtract) in [(removed, true), (added, false)] {
+            for &feature in features {
+                // SAFETY: the row is `DIM` floats from `feature · DIM`, inside
+                // `embed` (asserted above); `at + TILE · 8 <= DIM`.
+                let row = unsafe { embed.as_ptr().add(feature as usize * DIM + at) };
+                for (t, group) in sums.iter_mut().enumerate() {
+                    // SAFETY: as above; the load is unaligned.
+                    let value = unsafe { _mm256_loadu_ps(row.add(t * LANES)) };
+                    let mut power = value;
+                    for (k, slot) in group.iter_mut().enumerate() {
+                        *slot = if subtract {
+                            _mm256_sub_ps(*slot, power)
+                        } else {
+                            _mm256_add_ps(*slot, power)
+                        };
+                        if k + 1 < ORDER {
+                            power = _mm256_mul_ps(power, value);
+                        }
+                    }
+                }
+            }
+        }
+        for (t, group) in sums.iter().enumerate() {
+            for (k, &slot) in group.iter().enumerate() {
+                // SAFETY: as for the loads from `src`, on `dst`.
+                unsafe { _mm256_storeu_ps(dst.as_mut_ptr().add(k * DIM + at + t * LANES), slot) };
+            }
+        }
+    }
+}
+
+/// [`accumulate`], a group of eight channels at a time; see there. What the AVX2
+/// form is held to.
+#[allow(dead_code)]
+fn accumulate_groups(
     src: &[f32],
     dst: &mut [f32],
     embed: &[f32],
@@ -478,6 +854,36 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sym_token")]
+    #[test]
+    fn the_position_of_a_token_is_where_iter_position_finds_it() {
+        let mut state = 3u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as FeatureIndex % 2400
+        };
+        for len in 0..=48usize {
+            for _ in 0..50 {
+                let mut list: Vec<FeatureIndex> = Vec::new();
+                while list.len() < len {
+                    let t = next();
+                    if !list.contains(&t) {
+                        list.push(t);
+                    }
+                }
+                for token in list.iter().copied().chain([next(), 0, 2399]) {
+                    assert_eq!(
+                        position_of(&list, token),
+                        list.iter().position(|&p| p == token),
+                        "len {len} token {token}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_batch_of_features_is_the_features_one_at_a_time_to_the_last_bit() {
         // A table of values of the size the embeddings have, spread either side of
@@ -512,8 +918,15 @@ mod tests {
                 one_at_a_time(&mut want, &embed, feature, 1.0);
             }
             accumulate(&start, &mut got, &embed, &removed, &added);
+            let mut grouped = vec![f32::NAN; ORDER * DIM];
+            accumulate_groups(&start, &mut grouped, &embed, &removed, &added);
             for (at, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert_eq!(g.to_bits(), w.to_bits(), "round {round} entry {at}");
+                assert_eq!(
+                    grouped[at].to_bits(),
+                    w.to_bits(),
+                    "grouped, round {round} entry {at}"
+                );
             }
         }
     }
