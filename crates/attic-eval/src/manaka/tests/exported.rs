@@ -92,3 +92,11 @@ pub(super) const EXPORTED: Exported = Exported {
     rest: "FoldedTokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](UnfoldedPairSum[16](InputSlice[16(128:144)]))))))",
     hash: 0x73dda2f0,
 };
+
+/// From the file `export-nnue` wrote for a net at this shape (tideborn `feat/hm-pair-plain` d7bf3a4d,
+/// 2026-11-17): the nopairfold string with the first layer 64 wide.
+#[cfg(feature = "synn_token_128x2_64_32_pair16_o1_hm_nopairfold")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "FoldedTokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-64](ClippedReLU[64](Dense[64<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](UnfoldedPairSum[16](InputSlice[16(128:144)]))))))",
+    hash: 0x65519599,
+};

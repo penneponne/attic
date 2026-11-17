@@ -128,6 +128,9 @@ hce = []
 #   synn_token_128x2_32_32_pair16_o1_hm_nopairfold
 #                                          pair16_d128_o1_h32_h232_hm_nopairfold (and UnfoldedPairSum: the pair
 #                                          table is read at the tokens as they stand)
+#   synn_token_128x2_64_32_pair16_o1_hm_nopairfold
+#                                          pair16_d128_o1_h64_h232_hm_nopairfold (the same, its first hidden
+#                                          layer 64 wide)
 #   synn_token_128x2_32_32_pair16_m8_f2    pair16_d128_o3_h32_h232_m8_f2
 #
 # Manaka writes these with `manaka-train export-nnue` from a net trained under
@@ -141,6 +144,7 @@ synn_token_128x2_32_32_pair16 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
 synn_token_128x2_32_32_pair16_o1_hm_nopairfold = ["sym_token", "sym_hm", "sym_hm_nopairfold"]
+synn_token_128x2_64_32_pair16_o1_hm_nopairfold = ["sym_token", "sym_hm", "sym_hm_nopairfold"]
 synn_token_128x2_32_32_pair16_m8_f2 = ["sym_token"]
 # The two hand-crafted evaluations (HCE), spelled the same way: how many
 # coefficients, then how they are grouped. Material is 10 board slots and 7

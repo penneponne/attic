@@ -50,6 +50,7 @@ synn_token_128x2_32_32_pair16 = ["attic-eval/synn_token_128x2_32_32_pair16", "at
 synn_token_128x2_32_32_pair16_o1 = ["attic-eval/synn_token_128x2_32_32_pair16_o1", "attic-search/synn_token_128x2_32_32_pair16_o1"]
 synn_token_128x2_32_32_pair16_o1_hm = ["attic-eval/synn_token_128x2_32_32_pair16_o1_hm", "attic-search/synn_token_128x2_32_32_pair16_o1_hm"]
 synn_token_128x2_32_32_pair16_o1_hm_nopairfold = ["attic-eval/synn_token_128x2_32_32_pair16_o1_hm_nopairfold", "attic-search/synn_token_128x2_32_32_pair16_o1_hm_nopairfold"]
+synn_token_128x2_64_32_pair16_o1_hm_nopairfold = ["attic-eval/synn_token_128x2_64_32_pair16_o1_hm_nopairfold", "attic-search/synn_token_128x2_64_32_pair16_o1_hm_nopairfold"]
 synn_token_128x2_32_32_pair16_m8_f2 = ["attic-eval/synn_token_128x2_32_32_pair16_m8_f2", "attic-search/synn_token_128x2_32_32_pair16_m8_f2"]
 hce_material_17 = ["attic-eval/hce_material_17", "attic-search/hce_material_17", "hce"]
 hce_mobility_107_57 = ["attic-eval/hce_mobility_107_57", "attic-search/hce_mobility_107_57", "hce"]

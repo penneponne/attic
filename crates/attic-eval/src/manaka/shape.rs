@@ -88,6 +88,10 @@ const DIMS: Dims = if cfg!(any(
     // embeddings alone: the pair table carries the interactions the higher orders
     // would.
     Dims::new(128, 1, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_64_32_pair16_o1_hm_nopairfold") {
+    // The same, with the first hidden layer twice as wide: the layer every node pays for in full, and the
+    // one whose 32 units the policy and the value were found to compete for.
+    Dims::new(128, 1, 64, 32).pair(16)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_m8_f2") {
     Dims::new(128, 3, 32, 32).pair(16).moment(8).field(2)
 } else {
@@ -219,6 +223,7 @@ const _: () = {
         "synn_token_128x2_32_32_pair16_o1",
         "synn_token_128x2_32_32_pair16_o1_hm",
         "synn_token_128x2_32_32_pair16_o1_hm_nopairfold",
+        "synn_token_128x2_64_32_pair16_o1_hm_nopairfold",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(

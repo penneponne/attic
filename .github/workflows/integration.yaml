@@ -150,6 +150,7 @@ jobs:
             synn_token_128x2_32_32_pair16_o1 \
             synn_token_128x2_32_32_pair16_o1_hm \
             synn_token_128x2_32_32_pair16_o1_hm_nopairfold \
+            synn_token_128x2_64_32_pair16_o1_hm_nopairfold \
             synn_kp_128x2_32_32 \
             synn_kp_256x2_32_32 \
             synn_token_256x2_32_32 \
