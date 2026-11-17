@@ -19,9 +19,9 @@ use super::moment::touch_moment;
 #[cfg(feature = "sym_token")]
 use super::pair::{touch_pairs, touch_pairs_hm};
 #[cfg(feature = "sym_token")]
-use super::shape::HM;
-#[cfg(feature = "sym_token")]
 use super::shape::{HAS_FIELD, HAS_MOMENT, HAS_PAIR};
+#[cfg(feature = "sym_token")]
+use super::shape::{HM, HM_NOPAIRFOLD};
 use super::{DIM, FIELD_LEN, MOMENT_LEN, ORDER, PAIR, POWER_LEN, SymNetwork};
 
 /// What the pair sums are accumulated in. `f64`, which is not what the table is
@@ -132,6 +132,18 @@ pub struct Accumulator {
 #[cfg(feature = "sym_token")]
 const LINEAGE_LIMIT: u32 = 256;
 
+/// The folds the pair table is read in: each frame's own under `hm`, and neither under [`HM_NOPAIRFOLD`],
+/// whose pairs are read at the tokens as they stand whatever the frames' folds.
+#[cfg(feature = "sym_token")]
+#[inline]
+fn pair_folds(folded: [bool; Color::COUNT]) -> [bool; Color::COUNT] {
+    if HM_NOPAIRFOLD {
+        [false; Color::COUNT]
+    } else {
+        folded
+    }
+}
+
 impl Default for Accumulator {
     fn default() -> Self {
         Self::new()
@@ -188,7 +200,7 @@ impl Accumulator {
         #[cfg(feature = "sym_token")]
         {
             let black = std::mem::take(&mut self.active[Color::Black.index()]);
-            let folded = self.folded;
+            let folded = pair_folds(self.folded);
             for at in 0..black.len() {
                 touch_pairs_hm(
                     &mut self.pair,
@@ -450,6 +462,11 @@ impl Accumulator {
     /// there is no state for the fold, when the boards differ in so many tokens that the moves would read more
     /// rows than the sum does, or when the state has been moved by more than [`LINEAGE_LIMIT`] tokens.
     ///
+    /// Under [`HM_NOPAIRFOLD`] the pair table is read at the tokens as they stand, so a frame's pair sum does
+    /// not depend on its fold: both frames' are moved by the move's tokens as a net without `hm` moves them,
+    /// a crossing rebuilds the embedding, the moment and the field and nothing of the table, and `cache` is
+    /// not read.
+    ///
     /// The set of tokens `active` is the board as each frame numbers it, never reflected; the reflection is
     /// applied where the rows are read.
     fn derive_hm(
@@ -509,8 +526,13 @@ impl Accumulator {
 
         // The tokens, the pair sums and the moment and field of the frames that hold their fold, token by
         // token as in the unfolded derive: each removal leaves `active` before its pairs are taken out, and
-        // each addition enters it after its pairs are put in.
+        // each addition enters it after its pairs are put in. A pair table read unfolded does not care what
+        // fold a frame is in, so under `HM_NOPAIRFOLD` both frames' pair sums are moved here, crossed or not.
         let keep = [!rebuild[0], !rebuild[1]];
+        let (pair_fold, pair_keep) = match HM_NOPAIRFOLD {
+            true => ([false; Color::COUNT], [true; Color::COUNT]),
+            false => (src.folded, keep),
+        };
         let (black, white) = (halves[0], halves[1]);
         let (b, w) = (Color::Black.index(), Color::White.index());
         for (&token, &other) in black.removed().iter().zip(white.removed()) {
@@ -525,8 +547,8 @@ impl Accumulator {
                 token,
                 &dst.active[b],
                 -1.0,
-                src.folded,
-                keep,
+                pair_fold,
+                pair_keep,
             );
             for (i, token) in [(b, token), (w, other)] {
                 if keep[i] {
@@ -547,8 +569,8 @@ impl Accumulator {
                 token,
                 &dst.active[b],
                 1.0,
-                src.folded,
-                keep,
+                pair_fold,
+                pair_keep,
             );
             for (i, token) in [(b, token), (w, other)] {
                 if keep[i] {
@@ -565,7 +587,7 @@ impl Accumulator {
         }
 
         // A frame whose fold changed is built again from the board it now reads.
-        if rebuild.contains(&true) {
+        if rebuild.contains(&true) && !HM_NOPAIRFOLD {
             cache.for_net(net);
         }
         for (i, _) in rebuild.iter().enumerate().filter(|(_, crossed)| **crossed) {
@@ -574,6 +596,10 @@ impl Accumulator {
             let tokens = std::mem::take(&mut dst.active[i]);
             dst.sum_frame(net, i, &tokens);
             dst.active[i] = tokens;
+            // Its pair sum was moved by the move above, as the unfolded table it is read in is.
+            if HM_NOPAIRFOLD {
+                continue;
+            }
 
             // The state the frame leaves, in the fold it leaves, for when its king comes back.
             cache.folds[i][usize::from(src.folded[i])] = Some(FoldEntry {

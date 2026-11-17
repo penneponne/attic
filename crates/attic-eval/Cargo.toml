@@ -66,6 +66,8 @@ nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
 #                        table, a second moment or a square field can exist in
 #   sym_hm               ... read with `hm`: each frame mirrored left to right when its own king stands
 #                        on the sixth to ninth file (`HM` in `src/manaka/shape.rs`); token space only
+#   sym_hm_nopairfold    ... and with the pair table read at the tokens as they stand, the rest folded
+#                        (`HM_NOPAIRFOLD`); with `sym_hm` only
 #   hce                  every hand-crafted shape. Unlike the others it also
 #                        stands for them in the guard's pairwise lists, because
 #                        an HCE shape is exactly what `hce` being on means.
@@ -83,6 +85,7 @@ sym = []
 sym_kp = ["sym"]
 sym_halfkp = ["sym"]
 sym_hm = []
+sym_hm_nopairfold = ["sym_hm"]
 sym_token = ["sym"]
 hce = []
 # Manaka's own shapes: `SYNN`, SYM's sums behind NNUE's arithmetic. They read the
@@ -122,6 +125,9 @@ hce = []
 #   synn_token_128x2_32_32_pair16_o1       pair16_d128_o1_h32_h232
 #   synn_token_128x2_32_32_pair16_o1_hm    pair16_d128_o1_h32_h232_hm (the file says FoldedTokens: each frame is read
 #                                          mirrored when its own king is on files 6 to 9)
+#   synn_token_128x2_32_32_pair16_o1_hm_nopairfold
+#                                          pair16_d128_o1_h32_h232_hm_nopairfold (and UnfoldedPairSum: the pair
+#                                          table is read at the tokens as they stand)
 #   synn_token_128x2_32_32_pair16_m8_f2    pair16_d128_o3_h32_h232_m8_f2
 #
 # Manaka writes these with `manaka-train export-nnue` from a net trained under
@@ -134,6 +140,7 @@ synn_halfkp_128x2_32_32 = ["sym_halfkp"]
 synn_token_128x2_32_32_pair16 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
+synn_token_128x2_32_32_pair16_o1_hm_nopairfold = ["sym_token", "sym_hm", "sym_hm_nopairfold"]
 synn_token_128x2_32_32_pair16_m8_f2 = ["sym_token"]
 # The two hand-crafted evaluations (HCE), spelled the same way: how many
 # coefficients, then how they are grouped. Material is 10 board slots and 7

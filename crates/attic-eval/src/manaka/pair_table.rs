@@ -31,7 +31,7 @@ use crate::Aligned64;
 use super::PAIR;
 use super::reader::half_to_f32;
 #[cfg(feature = "sym_token")]
-use super::{HM, PAIR_ROWS};
+use super::{HM, HM_NOPAIRFOLD, PAIR_ROWS};
 
 /// Entries in a row of the table: both frames' channels.
 pub(super) const ROW: usize = 2 * PAIR;
@@ -138,7 +138,8 @@ impl PairTable {
                 row += 1;
             }
         }
-        let mixed = if HM {
+        // Frames folded differently read the pair table at different places only when the pairs fold.
+        let mixed = if HM && !HM_NOPAIRFOLD {
             mixed_halves(&halves)
         } else {
             Aligned64::zeroed(0)

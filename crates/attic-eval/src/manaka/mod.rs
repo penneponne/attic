@@ -120,8 +120,8 @@ pub use qdense::QuantW1;
 pub use qdense_i8::QuantW1I8;
 pub use shape::{
     BLOCK_LEN, DIM, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
-    HIDDEN, HIDDEN2, HM, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, PAIR_ROWS, POWER_LEN,
-    TOKENS,
+    HIDDEN, HIDDEN2, HM, HM_NOPAIRFOLD, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT,
+    PAIR_ROWS, POWER_LEN, TOKENS,
 };
 
 /// A loaded network, with the tables this shape actually reads.

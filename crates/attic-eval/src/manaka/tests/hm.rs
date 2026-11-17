@@ -6,7 +6,7 @@
 
 use attic_state::Color;
 
-use super::super::{Accumulator, FinnyCache, HM, evaluate_value, value_from_sums};
+use super::super::{Accumulator, FinnyCache, HM, HM_NOPAIRFOLD, evaluate_value, value_from_sums};
 use super::fixtures::{assert_close, assert_close_relative, king_walk_game, synthetic};
 use super::reference::{reference_value, reference_value_with};
 use crate::MoveDelta;
@@ -111,9 +111,13 @@ fn a_derive_is_a_refresh_when_the_kings_walk_across_the_line() {
         cache.from_entry, cache.from_nothing
     );
     // The crossings above were mostly built from the state the frame last had in the fold it entered, and
-    // were each held to a refresh: the cache was used, and what it gave is the accumulator.
+    // were each held to a refresh: the cache was used, and what it gave is the accumulator. A pair table
+    // read unfolded has no crossing to build, and the cache is not read at all.
+    if HM_NOPAIRFOLD {
+        assert_eq!((cache.from_entry, cache.from_nothing), (0, 0));
+    }
     assert!(
-        cache.from_entry > cache.from_nothing,
+        HM_NOPAIRFOLD || cache.from_entry > cache.from_nothing,
         "most crossings start from a kept state: {} from one, {} from nothing",
         cache.from_entry,
         cache.from_nothing
@@ -198,6 +202,9 @@ fn a_folded_frame_is_not_the_unfolded_one_and_an_unfolded_one_is() {
 /// reflects them, in the order given, and that frame's half of them. Frames folded differently read the
 /// second table and not two rows a pair, so this is what holds that table to the first. At every
 /// precision the table can be held in, since the second table is rounded by itself.
+///
+/// Not for `nopairfold`, which reads the table unfolded and has no second table.
+#[cfg(not(feature = "sym_hm_nopairfold"))]
 #[test]
 fn a_touch_in_any_fold_adds_what_each_frame_reads_alone() {
     use super::super::pair::{row_totals, touch_pairs_hm};
@@ -257,6 +264,9 @@ fn a_touch_in_any_fold_adds_what_each_frame_reads_alone() {
 
 /// A kept state is a sum over one network's table, so a cache handed a derive of another network forgets what it
 /// held, and the crossing is summed from nothing: two networks with the same shape are not each other's sums.
+///
+/// Not for `nopairfold`, whose crossings keep no state.
+#[cfg(not(feature = "sym_hm_nopairfold"))]
 #[test]
 fn a_cache_forgets_its_states_for_another_network() {
     const { assert!(HM, "this test is for the hm build") };
@@ -296,5 +306,63 @@ fn a_cache_forgets_its_states_for_another_network() {
         (cache.from_entry, cache.from_nothing),
         (entry, nothing + 1),
         "the first crossing under another network starts from nothing"
+    );
+}
+
+/// `nopairfold`'s pair sums are the ones the board as it stands gives, in every fold: a frame's pair sum after
+/// a refresh is the one a net that does not fold its pairs would build, and differs from the folded one
+/// whenever the frame folds, so the reference's agreement above is not one that a folded table could give.
+#[cfg(feature = "sym_hm_nopairfold")]
+#[test]
+fn the_pairs_are_read_unfolded_whatever_the_fold() {
+    use super::super::PAIR;
+    use super::super::pair::touch_pairs_hm;
+    use crate::tokens::active_features;
+
+    let net = synthetic();
+    let (mut folded_frames, mut differs) = (0, 0);
+    for seed in 1..=4 {
+        for (before, mv) in king_walk_game(seed, 120, 0.30, 0.25) {
+            let mut after = before.clone();
+            let _ = after.do_move(mv);
+            let mut acc = Accumulator::new();
+            acc.refresh(net, &after);
+            let black = active_features(&after, Color::Black);
+            // Both frames read reflected, which is the folded read of whichever frame folds (frames folded
+            // differently read a second table, which this build does not build).
+            for folds in [[false, false], [true, true]] {
+                let mut sums = [vec![0.0; PAIR], vec![0.0; PAIR]];
+                for at in 0..black.len() {
+                    touch_pairs_hm(
+                        &mut sums,
+                        net,
+                        black[at],
+                        &black[..at],
+                        1.0,
+                        folds,
+                        [true, true],
+                    );
+                }
+                for color in [Color::Black, Color::White] {
+                    let got = acc.pair(color);
+                    let same = sums[color.index()]
+                        .iter()
+                        .zip(&got)
+                        .all(|(want, got)| (*want as f32).to_bits() == got.to_bits());
+                    match folds == [false, false] {
+                        true => assert!(same, "seed {seed}: the unfolded pair sum"),
+                        false if acc.folded_for_test()[color.index()] => {
+                            folded_frames += 1;
+                            differs += usize::from(!same);
+                        }
+                        false => {}
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        folded_frames > 50 && differs == folded_frames,
+        "{differs} of {folded_frames}"
     );
 }

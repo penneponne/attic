@@ -81,7 +81,8 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(128, 3, 32, 32).pair(16)
 } else if cfg!(any(
     feature = "synn_token_128x2_32_32_pair16_o1",
-    feature = "synn_token_128x2_32_32_pair16_o1_hm"
+    feature = "synn_token_128x2_32_32_pair16_o1_hm",
+    feature = "synn_token_128x2_32_32_pair16_o1_hm_nopairfold"
 )) {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
@@ -101,6 +102,13 @@ const DIMS: Dims = if cfg!(any(
 /// not a row of [`DIMS`]. It is a constant: a build without it compiles none of the folding, and its code
 /// and speed are what they were.
 pub const HM: bool = cfg!(feature = "sym_hm");
+
+/// Under [`HM`], whether the pair table is read at each frame's tokens as they stand rather than folded: the
+/// embedding, the second moment and the square field read the folded frame, the pair table does not
+/// (`nopairfold`, an ablation of `hm` in Manaka's shape grammar). The table is then read as a net without
+/// `hm` reads it, one row a pair whatever the kings' files, and a frame whose king crosses the fifth file
+/// sums its embedding again and none of its pairs.
+pub const HM_NOPAIRFOLD: bool = cfg!(feature = "sym_hm_nopairfold");
 
 /// The width of one perspective's embedding.
 pub const DIM: usize = DIMS.dim;
@@ -210,6 +218,7 @@ const _: () = {
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
         "synn_token_128x2_32_32_pair16_o1_hm",
+        "synn_token_128x2_32_32_pair16_o1_hm_nopairfold",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(
