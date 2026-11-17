@@ -36,7 +36,7 @@ struct Met {
 fn a_derive_is_a_refresh_when_the_kings_walk_across_the_line() {
     const { assert!(HM, "this test is for the hm build") };
     let net = synthetic();
-    let mut cache = FinnyCache;
+    let mut cache = FinnyCache::default();
     let mut met = Met::default();
     for seed in 1..=24 {
         let game = king_walk_game(seed, 140, 0.30, 0.25);
@@ -106,7 +106,18 @@ fn a_derive_is_a_refresh_when_the_kings_walk_across_the_line() {
             acc.clone_from(&derived);
         }
     }
-    println!("{met:?}");
+    println!(
+        "{met:?}; crossings from a kept state {}, from nothing {}",
+        cache.from_entry, cache.from_nothing
+    );
+    // The crossings above were mostly built from the state the frame last had in the fold it entered, and
+    // were each held to a refresh: the cache was used, and what it gave is the accumulator.
+    assert!(
+        cache.from_entry > cache.from_nothing,
+        "most crossings start from a kept state: {} from one, {} from nothing",
+        cache.from_entry,
+        cache.from_nothing
+    );
     assert!(
         met.folds.iter().flatten().all(|&n| n > 0),
         "all four combinations of the frames' folds are met: {met:?}"
@@ -242,4 +253,48 @@ fn a_touch_in_any_fold_adds_what_each_frame_reads_alone() {
             }
         }
     }
+}
+
+/// A kept state is a sum over one network's table, so a cache handed a derive of another network forgets what it
+/// held, and the crossing is summed from nothing: two networks with the same shape are not each other's sums.
+#[test]
+fn a_cache_forgets_its_states_for_another_network() {
+    const { assert!(HM, "this test is for the hm build") };
+    let first = synthetic();
+    let second = synthetic().replicate();
+    let mut cache = FinnyCache::default();
+    // Walk one game with the first network until a crossing has come from a kept state.
+    let game = king_walk_game(3, 140, 0.30, 0.25);
+    let walk = |net: &super::super::SymNetwork,
+                cache: &mut FinnyCache,
+                until: &dyn Fn(&FinnyCache) -> bool| {
+        let mut acc = Accumulator::new();
+        acc.refresh(net, &game[0].0);
+        let mut derived = Accumulator::new();
+        for (before, mv) in &game {
+            let delta = MoveDelta::from_move(before, *mv);
+            let mut after = before.clone();
+            let _ = after.do_move(*mv);
+            Accumulator::derive_into_cached(&acc, &mut derived, net, &after, &delta, cache);
+            acc.clone_from(&derived);
+            if until(cache) {
+                return;
+            }
+        }
+        panic!(
+            "the game ended before {:?}",
+            (cache.from_entry, cache.from_nothing)
+        );
+    };
+    walk(first, &mut cache, &|c| c.from_entry > 0);
+    // The first crossing with the second network is summed from nothing, whatever the cache held.
+    let (entry, nothing) = (cache.from_entry, cache.from_nothing);
+    walk(&second, &mut cache, &|c| {
+        c.from_entry + c.from_nothing > entry + nothing
+    });
+    assert_eq!(
+        (cache.from_entry, cache.from_nothing),
+        (entry, nothing + 1),
+        "the first crossing under another network starts from nothing"
+    );
 }

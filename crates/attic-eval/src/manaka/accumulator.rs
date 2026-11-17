@@ -11,6 +11,8 @@ use crate::tokens::{
 
 use super::cache::FinnyCache;
 #[cfg(feature = "sym_token")]
+use super::cache::{FoldEntry, TokenList};
+#[cfg(feature = "sym_token")]
 use super::field::touch_field;
 #[cfg(feature = "sym_token")]
 use super::moment::touch_moment;
@@ -116,7 +118,19 @@ pub struct Accumulator {
     /// fifth file) is built from what is on the board. Always `false` in a build without `hm`.
     #[cfg(feature = "sym_token")]
     folded: [bool; Color::COUNT],
+    /// How many tokens each frame's pair sum has been moved by since it was last summed from nothing, which
+    /// is how far it can have drifted from that sum: each touch adds a total rounded to `f32`. A frame
+    /// rebuilt from the state it last had in a fold ([`FinnyCache`]) carries that state's count on, so that
+    /// a sum kept across many crossings is summed from nothing again once it passes [`LINEAGE_LIMIT`].
+    #[cfg(feature = "sym_token")]
+    lineage: [u32; Color::COUNT],
 }
+
+/// The most touches a pair sum taken from [`FinnyCache`] may carry: past it, the frame is summed from nothing.
+/// A search's root is refreshed every iteration, and a line from it moves a sum by a few tokens a ply, so this
+/// keeps a sum that crossed the line to about what one deep line already has.
+#[cfg(feature = "sym_token")]
+const LINEAGE_LIMIT: u32 = 256;
 
 impl Default for Accumulator {
     fn default() -> Self {
@@ -138,6 +152,8 @@ impl Accumulator {
             ],
             #[cfg(feature = "sym_token")]
             folded: [false; Color::COUNT],
+            #[cfg(feature = "sym_token")]
+            lineage: [0; Color::COUNT],
         }
     }
 
@@ -152,6 +168,7 @@ impl Accumulator {
             #[cfg(feature = "sym_token")]
             {
                 self.folded[i] = HM && crate::tokens::folds(&features);
+                self.lineage[i] = 0;
                 self.pair[i].fill(0.0);
                 self.moment[i].fill(0.0);
                 self.field[i].fill(0.0);
@@ -354,7 +371,14 @@ impl Accumulator {
     ) -> Accumulator {
         let delta = MoveDelta::from_move(pos, mv);
         let mut next = Accumulator::new();
-        Self::derive_into_cached(self, &mut next, net, pos, &delta, &mut FinnyCache);
+        Self::derive_into_cached(
+            self,
+            &mut next,
+            net,
+            pos,
+            &delta,
+            &mut FinnyCache::default(),
+        );
         next
     }
 
@@ -383,12 +407,12 @@ impl Accumulator {
         net: &SymNetwork,
         _post_pos: &Position,
         delta: &MoveDelta,
-        _cache: &mut FinnyCache,
+        cache: &mut FinnyCache,
     ) {
         let halves = [Color::Black, Color::White]
             .map(|color| delta.half(color).expect("a token delta is never a rebuild"));
         if HM {
-            Self::derive_hm(src, dst, net, &halves);
+            Self::derive_hm(src, dst, net, &halves, cache);
             return;
         }
         for (i, half) in halves.iter().enumerate() {
@@ -415,9 +439,16 @@ impl Accumulator {
     /// ever, except that the rows it takes out and puts in are the reflected ones if it is folded. A frame
     /// whose own king crossed the line between the fifth file and the sixth is read the other way now, which
     /// changes every board token of it, so it is built again from the tokens on the board after the move:
-    /// forty rows of the embedding, the same of the moment and the field, and its pair sum over the 780 pairs.
-    /// That is a little over one derive in forty (`1.3%` of the frames' derives in play), and every other
-    /// derive is the incremental update it was.
+    /// forty rows of the embedding, the same of the moment and the field, and its pair sum. That is about one
+    /// derive in twenty-five in a search, and every other derive is the incremental update it was.
+    ///
+    /// The pair sum is the costly part, a row for each of the 780 pairs, and it is not built from nothing
+    /// unless it has to be. `cache` holds the state each frame was last in under each fold; the frame's pair
+    /// sum is that state's, moved by the tokens the boards differ in, which is a dozen or so where a sum from
+    /// nothing is forty. The state the frame leaves is kept for its return, and the state it enters is kept
+    /// too, so that a sibling move crossing the same way starts from it. A frame is summed from nothing when
+    /// there is no state for the fold, when the boards differ in so many tokens that the moves would read more
+    /// rows than the sum does, or when the state has been moved by more than [`LINEAGE_LIMIT`] tokens.
     ///
     /// The set of tokens `active` is the board as each frame numbers it, never reflected; the reflection is
     /// applied where the rows are read.
@@ -426,6 +457,7 @@ impl Accumulator {
         dst: &mut Accumulator,
         net: &SymNetwork,
         halves: &[&PerspectiveDelta; Color::COUNT],
+        cache: &mut FinnyCache,
     ) {
         use crate::tokens::{folds_for_king, is_own_king, mirror_row};
 
@@ -447,6 +479,8 @@ impl Accumulator {
             if rebuild[i] {
                 continue;
             }
+            dst.lineage[i] =
+                src.lineage[i].saturating_add((half.removed().len() + half.added().len()) as u32);
             if !src.folded[i] {
                 accumulate(
                     &src.sums[i],
@@ -531,33 +565,130 @@ impl Accumulator {
         }
 
         // A frame whose fold changed is built again from the board it now reads.
-        for i in 0..Color::COUNT {
-            if !rebuild[i] {
-                continue;
-            }
-            dst.pair[i].fill(0.0);
+        if rebuild.contains(&true) {
+            cache.for_net(net);
+        }
+        for (i, _) in rebuild.iter().enumerate().filter(|(_, crossed)| **crossed) {
             dst.moment[i].fill(0.0);
             dst.field[i].fill(0.0);
             let tokens = std::mem::take(&mut dst.active[i]);
             dst.sum_frame(net, i, &tokens);
             dst.active[i] = tokens;
-            // This frame's pair sum, over every pair once and the black frame's list read in this frame's
-            // numbering: the black list when this is the black frame, and the white list turned back to it
-            // when it is the white (`touch_pairs_hm` reads the table in the black frame's numbering).
-            let black_list = Self::black_list_of(&dst.active, i);
-            let mut update = [false; Color::COUNT];
-            update[i] = true;
-            for at in 0..black_list.len() {
-                touch_pairs_hm(
-                    &mut dst.pair,
-                    net,
-                    black_list[at],
-                    &black_list[..at],
-                    1.0,
-                    dst.folded,
-                    update,
-                );
+
+            // The state the frame leaves, in the fold it leaves, for when its king comes back.
+            cache.folds[i][usize::from(src.folded[i])] = Some(FoldEntry {
+                tokens: TokenList::black(&src.active[i], i),
+                pair: src.pair[i]
+                    .as_slice()
+                    .try_into()
+                    .expect("a pair sum is PAIR long"),
+                lineage: src.lineage[i],
+            });
+            // The pair sum it enters, read in the black frame's numbering (`touch_pairs_hm` reads the table in
+            // it), and the state it now has kept for a sibling that crosses the same way.
+            let now = TokenList::black(&dst.active[i], i);
+            let entering = cache.folds[i][usize::from(dst.folded[i])];
+            let built = Self::pair_from(net, i, dst.folded, entering.as_ref(), &now, cache);
+            dst.pair[i].copy_from_slice(&built.pair);
+            dst.lineage[i] = built.lineage;
+            cache.folds[i][usize::from(dst.folded[i])] = Some(built);
+        }
+    }
+
+    /// Frame `i`'s pair sum over `now` (the black frame's numbering) in the folds `folded`: from `entry`, the
+    /// state the frame last had in the fold it is in, moved by the tokens the two differ in, or from nothing.
+    ///
+    /// Each token that `entry` has and `now` does not leaves the list before its rows are taken out, and each
+    /// one `now` has and `entry` does not has its rows put in before it joins, as a derive does, so the list
+    /// at every touch is the other tokens present. From nothing is the same thing from an empty list, a token
+    /// at a time against the ones before it, which is the order [`Accumulator::refresh`] gives: the bits are a
+    /// refresh's.
+    fn pair_from(
+        net: &SymNetwork,
+        i: usize,
+        folded: [bool; Color::COUNT],
+        entry: Option<&FoldEntry>,
+        now: &TokenList,
+        #[cfg_attr(not(test), allow(unused_variables))] cache: &mut FinnyCache,
+    ) -> FoldEntry {
+        use super::TOKENS;
+
+        const WORDS: usize = TOKENS.div_ceil(64);
+        let mut update = [false; Color::COUNT];
+        update[i] = true;
+        let mut sums = [vec![0.0; PAIR], vec![0.0; PAIR]];
+
+        // What the boards differ in, through a set of `entry`'s tokens: what is left of it after `now`'s are
+        // taken out is what left, and what of `now` was not in it is what came.
+        let mut changes = None;
+        if let Some(entry) = entry.filter(|e| e.lineage < LINEAGE_LIMIT) {
+            let mut had = [0u64; WORDS];
+            for &t in entry.tokens.as_slice() {
+                had[t as usize / 64] |= 1 << (t % 64);
             }
+            let mut came = TokenList::new();
+            for &t in now.as_slice() {
+                let (word, bit) = (t as usize / 64, 1u64 << (t % 64));
+                if had[word] & bit != 0 {
+                    had[word] &= !bit;
+                } else {
+                    came.push(t);
+                }
+            }
+            let mut went = TokenList::new();
+            for &t in entry.tokens.as_slice() {
+                if had[t as usize / 64] & (1 << (t % 64)) != 0 {
+                    went.push(t);
+                }
+            }
+            // A touch reads a row for each other token present, so the moves read about `(went + came) · n`
+            // rows and a sum from nothing `n (n − 1) / 2`.
+            let n = now.len();
+            let moves = went.len() + came.len();
+            let lineage = entry.lineage.saturating_add(moves as u32);
+            if 2 * moves < n.saturating_sub(1) && lineage <= LINEAGE_LIMIT {
+                changes = Some((entry, went, came, lineage));
+            }
+        }
+
+        let (list, lineage) = match changes {
+            Some((entry, went, came, lineage)) => {
+                sums[i].copy_from_slice(&entry.pair);
+                let mut list = entry.tokens;
+                for &t in went.as_slice() {
+                    list.remove(t);
+                    touch_pairs_hm(&mut sums, net, t, list.as_slice(), -1.0, folded, update);
+                }
+                for &t in came.as_slice() {
+                    touch_pairs_hm(&mut sums, net, t, list.as_slice(), 1.0, folded, update);
+                    list.push(t);
+                }
+                #[cfg(test)]
+                {
+                    cache.from_entry += 1;
+                }
+                (list, lineage)
+            }
+            None => {
+                let mut list = TokenList::new();
+                for &t in now.as_slice() {
+                    touch_pairs_hm(&mut sums, net, t, list.as_slice(), 1.0, folded, update);
+                    list.push(t);
+                }
+                #[cfg(test)]
+                {
+                    cache.from_nothing += 1;
+                }
+                (list, 0)
+            }
+        };
+        FoldEntry {
+            tokens: list,
+            pair: sums[i]
+                .as_slice()
+                .try_into()
+                .expect("a pair sum is PAIR long"),
+            lineage,
         }
     }
 
@@ -582,19 +713,7 @@ impl Accumulator {
             copy::<_, FIELD_LEN>(&mut self.field[i], &src.field[i]);
         }
         self.active[i].clone_from(&src.active[i]);
-    }
-
-    /// The tokens of the black frame, unreflected, given the lists of both: frame `i`'s own list when `i` is the
-    /// black frame, and the white list read through `other_frame` when it is the white. A frame that rebuilds
-    /// its pair sum reads the table in the black frame's numbering whichever frame it is.
-    fn black_list_of(active: &[Vec<FeatureIndex>; Color::COUNT], i: usize) -> Vec<FeatureIndex> {
-        match i {
-            0 => active[0].clone(),
-            _ => active[1]
-                .iter()
-                .map(|&token| crate::tokens::other_frame(token))
-                .collect(),
-        }
+        self.lineage[i] = src.lineage[i];
     }
 
     /// The pair, moment and field sums and the sets of tokens of both halves,
