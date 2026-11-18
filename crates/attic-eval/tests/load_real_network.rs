@@ -4,16 +4,22 @@
 //! the test prints a notice and passes and the default `cargo test` run stays
 //! green everywhere.
 
-#![cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+#![cfg(feature = "sfnn")]
 
 use std::path::PathBuf;
 
 use attic_eval::{HIDDEN_SIZE, LAYER_STACKS, NUM_FEATURES, load_network};
 
-/// Resolves the staged network path relative to the workspace root.
+/// Resolves the staged network path relative to the workspace root; the threat shape's is
+/// Sirius's, under `ATTIC_SIRIUS_REF` (see `sirius_parity.rs`).
+#[cfg(feature = "sfnn_threat")]
+fn nn_bin_path() -> PathBuf {
+    std::env::var_os("ATTIC_SIRIUS_REF")
+        .map(|dir| PathBuf::from(dir).join("eval/nn.bin"))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/nn.bin"))
+}
+
+#[cfg(not(feature = "sfnn_threat"))]
 fn nn_bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/nn.bin")
 }
@@ -39,6 +45,25 @@ fn loads_real_network_if_present() {
         HIDDEN_SIZE * NUM_FEATURES,
         "ft weight count"
     );
+
+    // Sirius's file also carries the threat block: 218,016 rows of 1,024 signed bytes.
+    #[cfg(feature = "sfnn_threat")]
+    {
+        assert_eq!(
+            net.threat_weights.len(),
+            218_016 * HIDDEN_SIZE,
+            "threat byte count"
+        );
+        assert!(
+            (net.threat_weights.as_ptr() as usize).is_multiple_of(64),
+            "threat block not 64-byte aligned"
+        );
+        assert_eq!(
+            net.sha256[..4],
+            [0x2d, 0x2f, 0x8e, 0x94],
+            "not the Sirius nn.bin this test was written against (sha256 2d2f8e94...)"
+        );
+    }
 
     // Every buffer must land on a 64-byte boundary for the SIMD kernels.
     let is_aligned = |ptr: *const u8| (ptr as usize).is_multiple_of(64);

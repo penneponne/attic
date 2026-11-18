@@ -3,8 +3,8 @@
   "depth": 8,
   "hash_mb": 256,
   "fv_scale": 28,
-  "bestmove": "N*4d",
-  "score": { "cp": -501 },
-  "nodes": 21091,
-  "pv": ["N*4d", "5b5c", "S*4b", "2d4b", "6f5g", "G*7i", "6i5h", "2i2h+", "5i4h", "5c4d"]
+  "bestmove": "6f5g",
+  "score": { "cp": 380 },
+  "nodes": 8098,
+  "pv": ["6f5g", "2d5g+"]
 }

@@ -23,26 +23,29 @@ use crate::types::{NetDims, NetHeader, NnueError, NnueNetwork, NnueNetworkBuilde
 // and never the shape — which is why the hashes below have to.
 const NNUE_VERSION: u32 = 0x7AF3_2F16;
 
-#[cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 const NNUE_HASH_VALUE: u32 = 0x3C20_3B32;
-#[cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+/// Sirius's header hash. Unlike the other SFNN shapes' it is not a warning when it differs:
+/// the file's layout depends on it (see [`parse_from_bytes`] under the threat shape).
+#[cfg(feature = "sfnn_threat")]
+const NNUE_HASH_VALUE: u32 = 0x684F_7658;
+#[cfg(feature = "sfnn")]
 const FT_HASH: u32 = 0x5F13_4AB8;
-#[cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+#[cfg(feature = "sfnn")]
 const NET_HASH: u32 = 0x6333_718A;
-#[cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 const ARCH_STRING: &str = "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-15](ClippedReLU[15](AffineTransform[15<-3072](InputSlice[3072(0:3072)]))))){LayerStack=9}";
+/// The architecture string Sirius's loader substitutes for the empty one its file carries.
+#[cfg(feature = "sfnn_threat")]
+const ARCH_STRING: &str = "ModelType=SFNNWithoutPsqt;Features=HalfKA2_hm(Friend)[73305->1024x2],Threat=218016,ThreatProfile=23,Network=SFNN_HALFKA2_1024_15_64_8GP{LayerStack=8;Bucket=GP(0.620586,0.820163,0.916409,0.961542,0.984851,0.996475,1.116108)}";
+/// The `ThreatProfile` the threat block was made for. Any other profile is another
+/// attacker set, whose rows are numbered differently.
+#[cfg(feature = "sfnn_threat")]
+const THREAT_PROFILE: u32 = 23;
+// The four SFNN constants above are the 1536 network's, and every SFNN shape
+// shares them: the 1024 file carries these same hashes, which is why a clean
+// load of it has no warning to report. Only the architecture string differs
+// between the files, and it is read and never compared.
 
 // The standard shapes' hashes were read out of files YaneuraOu itself wrote —
 // `external/kp256.zip` and `assets/eval/halfkp256/hao/nn.bin` — rather than
@@ -61,6 +64,22 @@ const NET_HASH: u32 = 0x6333_7156;
 #[cfg(feature = "nnue_kp_256x2_32_32")]
 const ARCH_STRING: &str = "Features=K+P[1710->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))";
 
+// No released network has this shape, so these were not read out of a file.
+// They follow from the three that were, each hash depending on one thing the
+// shapes vary: the transformer's is the feature set's constant xor `2 · width`
+// (KP256's `0x3F5715FF` gives `0x3F5716FF` at 128, as HalfKP's two agree), the
+// dense stack's depends on the width it reads and not the features (HalfKP128's
+// `0x63337136`), and the header's is their xor. Manaka's exporter writes the
+// same numbers.
+#[cfg(feature = "nnue_kp_128x2_32_32")]
+const NNUE_HASH_VALUE: u32 = 0x5C64_67C9;
+#[cfg(feature = "nnue_kp_128x2_32_32")]
+const FT_HASH: u32 = 0x3F57_16FF;
+#[cfg(feature = "nnue_kp_128x2_32_32")]
+const NET_HASH: u32 = 0x6333_7136;
+#[cfg(feature = "nnue_kp_128x2_32_32")]
+const ARCH_STRING: &str = "Features=K+P[1710->128x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-256](InputSlice[256(0:256)])))))";
+
 #[cfg(feature = "nnue_halfkp_256x2_32_32")]
 const NNUE_HASH_VALUE: u32 = 0x3E5A_A6EE;
 #[cfg(feature = "nnue_halfkp_256x2_32_32")]
@@ -69,6 +88,32 @@ const FT_HASH: u32 = 0x5D69_D7B8;
 const NET_HASH: u32 = 0x6333_7156;
 #[cfg(feature = "nnue_halfkp_256x2_32_32")]
 const ARCH_STRING: &str = "Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))";
+
+// The two files below were checked against the reference's own formulas: the
+// feature-transformer hash is `0x5D69D5B8 ^ (2 * width)`, the network hash folds
+// the layer widths into a chain, and the header hash is their xor. The hashes in
+// `halfkp128/kiouai/nn.bin` and `halfkp768/aoba/nn.bin` come out as written here.
+#[cfg(feature = "nnue_halfkp_128x2_32_32")]
+const NNUE_HASH_VALUE: u32 = 0x3E5A_A58E;
+#[cfg(feature = "nnue_halfkp_128x2_32_32")]
+const FT_HASH: u32 = 0x5D69_D4B8;
+#[cfg(feature = "nnue_halfkp_128x2_32_32")]
+const NET_HASH: u32 = 0x6333_7136;
+#[cfg(feature = "nnue_halfkp_128x2_32_32")]
+const ARCH_STRING: &str = "Features=HalfKP(Friend)[125388->128x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-256](InputSlice[256(0:256)])))))";
+
+// The architecture string in AobaNNUE's file still says `256x2` and 256-wide
+// layers, a leftover of the network it was trained from. It is read and never
+// compared, so nothing here depends on it; the hashes and the size are what say
+// 768x2-16-64.
+#[cfg(feature = "nnue_halfkp_768x2_16_64")]
+const NNUE_HASH_VALUE: u32 = 0x3E5A_A222;
+#[cfg(feature = "nnue_halfkp_768x2_16_64")]
+const FT_HASH: u32 = 0x5D69_D3B8;
+#[cfg(feature = "nnue_halfkp_768x2_16_64")]
+const NET_HASH: u32 = 0x6333_719A;
+#[cfg(feature = "nnue_halfkp_768x2_16_64")]
+const ARCH_STRING: &str = "Features=HalfKP(Friend)[125388->768x2],Network=AffineTransform[1<-64](ClippedReLU[64](AffineTransform[64<-16](ClippedReLU[16](AffineTransform[16<-1536](InputSlice[1536(0:1536)])))))";
 const LEB128_MAGIC: &[u8; 17] = b"COMPRESSED_LEB128";
 
 /// Warning body for a feature-transformer or layer-stack hash mismatch,
@@ -91,7 +136,8 @@ pub fn load_network_with_warnings(path: &Path) -> Result<(NnueNetwork, Vec<Strin
 ///
 /// The serialization is the same for every SFNN shape — header, feature
 /// transformer, then one block per layer stack — so only the read sizes change.
-/// [`NetDims::HALFKA2304`] loads the network NAGISA V4 ships.
+/// [`NetDims::HALFKA2304`] loads the network NAGISA V4 ships, and
+/// [`NetDims::HALFKA1024`] the one NAGISA V3 does.
 pub fn load_network_with_dims(
     path: &Path,
     dims: &NetDims,
@@ -104,6 +150,7 @@ pub fn load_network_with_dims(
     parse_from_bytes(&bytes, dims, sha256)
 }
 
+#[cfg(not(feature = "sfnn_threat"))]
 fn parse_from_bytes(
     bytes: &[u8],
     dims: &NetDims,
@@ -131,6 +178,91 @@ fn parse_from_bytes(
     Ok((builder.build(), warnings))
 }
 
+/// Sirius's file: header, feature transformer (LEB128, at the scale the file holds), the
+/// threat profile and the raw int8 threat block, then eight layer stacks.
+///
+/// Where the other SFNN files are loose about what they accept, this one is not. Its header
+/// hash and its empty architecture string are what say the block after the transformer is
+/// there and how its rows are numbered, so a file that differs in either is a different
+/// network and is refused, not warned about. The two section hashes keep the reference's
+/// behaviour (a warning only).
+#[cfg(feature = "sfnn_threat")]
+fn parse_from_bytes(
+    bytes: &[u8],
+    dims: &NetDims,
+    sha256: [u8; 32],
+) -> Result<(NnueNetwork, Vec<String>), NnueError> {
+    let mut warnings = Vec::new();
+    let mut reader = ByteReader::new(bytes);
+    let header = read_threat_header(&mut reader)?;
+    let mut builder = NnueNetworkBuilder::with_dims(header, sha256, dims);
+
+    let ft_hash = reader.read_u32_le()?;
+    if ft_hash != FT_HASH {
+        warnings.push(SECTION_HASH_WARNING.to_string());
+    }
+    // Not `read_i16_block_into`: that one falls back to plain `i16`s when the magic is
+    // absent, and Sirius's loader has no such case. Not scaled either: the accumulator is at
+    // the file's scale, and its transform is made for that (see `crate::transformer`).
+    read_leb128_i16_into(&mut reader, builder.ft_biases_mut())?;
+    read_leb128_i16_into(&mut reader, builder.ft_weights_mut())?;
+
+    let profile = reader.read_u32_le()?;
+    if profile != THREAT_PROFILE {
+        return Err(NnueError::InvalidFormat {
+            reason: format!(
+                "threat block profile {profile} does not match {THREAT_PROFILE}, the only one this build reads"
+            ),
+        });
+    }
+    let raw = reader.read_slice(dims.threat_rows * dims.hidden_size)?;
+    for (slot, &byte) in builder.threat_weights_mut().iter_mut().zip(raw) {
+        *slot = byte as i8;
+    }
+
+    for i in 0..dims.layer_stacks {
+        read_network_block(&mut reader, &mut builder, i, &mut warnings)?;
+    }
+    reader.assert_eof()?;
+    Ok((builder.build(), warnings))
+}
+
+/// Sirius's header: the version, the hash `0x684f7658`, and an architecture string of
+/// length zero (its loader then uses a built-in one, which [`ARCH_STRING`] spells).
+#[cfg(feature = "sfnn_threat")]
+fn read_threat_header(reader: &mut ByteReader) -> Result<NetHeader, NnueError> {
+    let version = reader.read_u32_le()?;
+    if version != NNUE_VERSION {
+        return Err(NnueError::InvalidFormat {
+            reason: format!("NNUE header version mismatch: expected {NNUE_VERSION} got {version}"),
+        });
+    }
+    let hash = reader.read_u32_le()?;
+    if hash != NNUE_HASH_VALUE {
+        return Err(NnueError::InvalidFormat {
+            reason: format!(
+                "header hash {hash:#010x} is not {NNUE_HASH_VALUE:#010x}: this build reads only \
+                 Sirius's threat network (sfnn_halfkahm2_threat_1024_15_64_8gp)"
+            ),
+        });
+    }
+    let arch_size = reader.read_u32_le()?;
+    if arch_size != 0 {
+        return Err(NnueError::InvalidFormat {
+            reason: format!(
+                "architecture string of {arch_size} bytes: this build reads only the file \
+                 that leaves it empty, as Sirius's does"
+            ),
+        });
+    }
+    Ok(NetHeader {
+        version,
+        hash,
+        arch_id: ARCH_STRING.to_string(),
+    })
+}
+
+#[cfg(not(feature = "sfnn_threat"))]
 fn read_header(
     reader: &mut ByteReader,
     warnings: &mut Vec<String>,
@@ -168,6 +300,7 @@ fn read_header(
 
 /// Decode one signed-LEB128 block straight into `out`, whose length is the
 /// value count.
+#[cfg(not(feature = "sfnn_threat"))]
 fn read_i16_block_into(reader: &mut ByteReader, out: &mut [i16]) -> Result<(), NnueError> {
     if reader.peek_slice(LEB128_MAGIC.len()) == Some(&LEB128_MAGIC[..]) {
         return read_leb128_i16_into(reader, out);
@@ -227,10 +360,7 @@ fn read_leb128_i16_into(reader: &mut ByteReader, out: &mut [i16]) -> Result<(), 
 }
 
 /// No-op for the shapes whose `ReadParameters` takes the plain `#else` arm.
-#[cfg(not(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-)))]
+#[cfg(not(feature = "sfnn"))]
 fn scale_ft_i16_x2_in_place(_values: &mut [i16]) -> Result<(), NnueError> {
     Ok(())
 }
@@ -252,10 +382,7 @@ fn scale_ft_i16_x2_in_place(_values: &mut [i16]) -> Result<(), NnueError> {
 /// position at 90 where YaneuraOu says 125, and each of the four bench
 /// positions off by more — every accumulator lane exactly twice the reference
 /// value, which is the shape of the bug rather than a rounding difference.
-#[cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 fn scale_ft_i16_x2_in_place(values: &mut [i16]) -> Result<(), NnueError> {
     for slot in values.iter_mut() {
         let scaled = (*slot as i32) * 2;
@@ -367,6 +494,7 @@ impl<'a> ByteReader<'a> {
     ///
     /// `None` when fewer than `n` remain, which is an ordinary answer here and
     /// not an error: the only caller is asking whether a magic is present.
+    #[cfg(not(feature = "sfnn_threat"))]
     fn peek_slice(&self, n: usize) -> Option<&'a [u8]> {
         self.bytes.get(self.pos..self.pos.checked_add(n)?)
     }
@@ -555,7 +683,7 @@ mod sha256 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sfnn_threat")))]
 mod tests {
     use super::*;
 
@@ -569,6 +697,7 @@ mod tests {
         fc_1_padded_input: 2,
         fc_2_output: 1,
         fc_2_padded_input: 2,
+        threat_rows: 0,
     };
 
     fn build_valid_bytes(dims: &NetDims, arch: &str) -> Vec<u8> {
@@ -610,10 +739,7 @@ mod tests {
 
     // The four helpers below only feed the FT-scale tests, and the standard
     // shapes scale nothing (`ft_scale_is_a_no_op_for_the_standard_shapes`).
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     fn append_signed_leb128_block(out: &mut Vec<u8>, values: &[i16]) {
         out.extend_from_slice(LEB128_MAGIC);
         let len_pos = out.len();
@@ -626,10 +752,7 @@ mod tests {
         out[len_pos..len_pos + 4].copy_from_slice(&bytes_left.to_le_bytes());
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     fn encode_signed_leb128(out: &mut Vec<u8>, mut value: i64) {
         loop {
             let byte = (value as u8) & 0x7F;
@@ -645,10 +768,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     fn build_bytes_with_ft(dims: &NetDims, arch: &str, biases: &[i16], weights: &[i16]) -> Vec<u8> {
         assert_eq!(biases.len(), dims.hidden_size);
         assert_eq!(weights.len(), dims.hidden_size * dims.num_features);
@@ -672,10 +792,7 @@ mod tests {
         out
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     const SCALE_DIMS: NetDims = NetDims {
         hidden_size: 5,
         num_features: 2,
@@ -686,6 +803,7 @@ mod tests {
         fc_1_padded_input: 2,
         fc_2_output: 1,
         fc_2_padded_input: 2,
+        threat_rows: 0,
     };
 
     #[test]
@@ -851,10 +969,7 @@ mod tests {
         assert_eq!(net.stacks.len(), TEST_DIMS.layer_stacks);
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     #[test]
     fn corrupted_leb128_magic_is_rejected() {
         let mut bytes = build_valid_bytes(&TEST_DIMS, ARCH_STRING);
@@ -868,10 +983,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     #[test]
     fn ft_scale_doubles_biases_and_weights() {
         let biases: [i16; 5] = [0, 1, -1, 16_383, -16_384];
@@ -893,10 +1005,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    ))]
+    #[cfg(feature = "sfnn")]
     #[test]
     fn ft_scale_rejects_overflow_bias() {
         let biases: [i16; 5] = [16_384, 0, 0, 0, 0];
@@ -932,10 +1041,7 @@ mod tests {
     /// doubled every shape, so a KP256 accumulator saturated where the
     /// reference's did not and the start position evaluated to 90 where
     /// YaneuraOu says 125.
-    #[cfg(not(any(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-    )))]
+    #[cfg(not(feature = "sfnn"))]
     #[test]
     fn ft_scale_is_a_no_op_for_the_standard_shapes() {
         let mut values: [i16; 5] = [0, 1, -1, 16_383, -16_384];
@@ -1010,5 +1116,245 @@ mod tests {
         );
         // Hash mismatch is expected: NNUE_HASH_VALUE is the 1536 constant.
         eprintln!("warnings={warnings:?} arch={}", net.header.arch_id);
+    }
+
+    /// The NAGISA V3 counterpart: reads a real 1024 `nn.bin` end to end.
+    ///
+    /// The two 1024 shapes (`progress8kpabs` and `progress8ek`) share this layout
+    /// and this test; they differ in the stack-selection rule, which loading does
+    /// not touch.
+    ///
+    /// Skipped unless `ATTIC_HALFKA1024_NN` names a file (78,442,142 bytes in
+    /// the copy this was written against). `load_network_with_dims` ends in an
+    /// end-of-file check, so a layout that is off by a byte anywhere fails here
+    /// rather than loading short.
+    #[cfg(feature = "sfnn")]
+    #[test]
+    fn loads_sfnn_halfkahm2_1024_15_64_progress8kpabs_network() {
+        let Ok(path) = std::env::var("ATTIC_HALFKA1024_NN") else {
+            return;
+        };
+        let (net, warnings) =
+            super::load_network_with_dims(std::path::Path::new(&path), &NetDims::HALFKA1024)
+                .expect("HALFKA1024 network should parse");
+        assert_eq!(net.header.version, 0x7AF3_2F16);
+        // The arch string is the one place the file names its own shape. Fail
+        // loudly if we were handed a 1536 or a 2304.
+        assert!(
+            net.header.arch_id.contains("1024x2"),
+            "arch_id={}",
+            net.header.arch_id
+        );
+        assert_eq!(net.stacks.len(), 9);
+        assert!(warnings.is_empty(), "hash mismatches: {warnings:?}");
+    }
+}
+
+/// The threat shape's file, on small dimensions: what it accepts and each way it is refused.
+#[cfg(all(test, feature = "sfnn_threat"))]
+mod threat_tests {
+    use super::*;
+
+    const DIMS: NetDims = NetDims {
+        hidden_size: 4,
+        num_features: 2,
+        layer_stacks: 2,
+        fc_0_output: 2,
+        fc_0_padded_input: 4,
+        fc_1_output: 2,
+        fc_1_padded_input: 2,
+        fc_2_output: 1,
+        fc_2_padded_input: 2,
+        threat_rows: 3,
+    };
+
+    fn encode_signed_leb128(out: &mut Vec<u8>, mut value: i64) {
+        loop {
+            let byte = (value as u8) & 0x7F;
+            value >>= 7;
+            let sign_bit = byte & 0x40;
+            if (value == 0 && sign_bit == 0) || (value == -1 && sign_bit != 0) {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn append_leb128_block(out: &mut Vec<u8>, values: &[i16]) {
+        out.extend_from_slice(LEB128_MAGIC);
+        let len_pos = out.len();
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let start = out.len();
+        for &v in values {
+            encode_signed_leb128(out, v as i64);
+        }
+        let n = (out.len() - start) as u32;
+        out[len_pos..len_pos + 4].copy_from_slice(&n.to_le_bytes());
+    }
+
+    fn ft_biases() -> Vec<i16> {
+        vec![-3, 0, 62, -64]
+    }
+
+    fn ft_weights() -> Vec<i16> {
+        // A value of each LEB128 width, negative and positive, so that nothing is doubled
+        // or truncated unnoticed.
+        vec![1, -1, 8191, -8192, 8192, -8193, 20_000, -20_000]
+    }
+
+    fn threat_block() -> Vec<u8> {
+        (0..DIMS.threat_rows * DIMS.hidden_size)
+            .map(|i| (i as i32 * 37 - 100) as u8)
+            .collect()
+    }
+
+    /// A valid file for [`DIMS`], with the places a test may want to break exposed.
+    struct Parts {
+        version: u32,
+        hash: u32,
+        arch: Vec<u8>,
+        raw_ft: bool,
+        profile: u32,
+        trailing: usize,
+    }
+
+    impl Parts {
+        fn valid() -> Self {
+            Parts {
+                version: NNUE_VERSION,
+                hash: NNUE_HASH_VALUE,
+                arch: Vec::new(),
+                raw_ft: false,
+                profile: THREAT_PROFILE,
+                trailing: 0,
+            }
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&self.version.to_le_bytes());
+            out.extend_from_slice(&self.hash.to_le_bytes());
+            out.extend_from_slice(&(self.arch.len() as u32).to_le_bytes());
+            out.extend_from_slice(&self.arch);
+            out.extend_from_slice(&FT_HASH.to_le_bytes());
+            if self.raw_ft {
+                for v in ft_biases().into_iter().chain(ft_weights()) {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            } else {
+                append_leb128_block(&mut out, &ft_biases());
+                append_leb128_block(&mut out, &ft_weights());
+            }
+            out.extend_from_slice(&self.profile.to_le_bytes());
+            out.extend_from_slice(&threat_block());
+            for stack in 0..DIMS.layer_stacks {
+                out.extend_from_slice(&NET_HASH.to_le_bytes());
+                for k in 0..DIMS.fc_0_output {
+                    out.extend_from_slice(&(100 * stack as i32 + k as i32).to_le_bytes());
+                }
+                out.extend((0..DIMS.fc_0_output * DIMS.fc_0_padded_input).map(|i| i as u8));
+                for k in 0..DIMS.fc_1_output {
+                    out.extend_from_slice(&(7 * k as i32 - 5).to_le_bytes());
+                }
+                out.extend((0..DIMS.fc_1_output * DIMS.fc_1_padded_input).map(|i| (3 * i) as u8));
+                out.extend_from_slice(&(-9i32).to_le_bytes());
+                out.extend((0..DIMS.fc_2_output * DIMS.fc_2_padded_input).map(|i| (5 * i) as u8));
+            }
+            out.resize(out.len() + self.trailing, 0);
+            out
+        }
+    }
+
+    fn parse(bytes: &[u8]) -> Result<(NnueNetwork, Vec<String>), NnueError> {
+        parse_from_bytes(bytes, &DIMS, [0u8; 32])
+    }
+
+    fn reason(result: Result<(NnueNetwork, Vec<String>), NnueError>) -> String {
+        match result {
+            Err(NnueError::InvalidFormat { reason }) => reason,
+            Err(other) => other.to_string(),
+            Ok(_) => panic!("the file was accepted"),
+        }
+    }
+
+    #[test]
+    fn a_valid_file_loads_without_a_warning_and_nothing_is_scaled() {
+        let (net, warnings) = parse(&Parts::valid().bytes()).expect("a valid file loads");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(&*net.ft_biases, ft_biases().as_slice());
+        assert_eq!(&*net.ft_weights, ft_weights().as_slice());
+        let want: Vec<i8> = threat_block().into_iter().map(|b| b as i8).collect();
+        assert_eq!(&*net.threat_weights, want.as_slice());
+        assert_eq!(net.stacks.len(), DIMS.layer_stacks);
+        assert_eq!(net.stacks[1].fc_0_biases()[1], 101);
+        assert_eq!(net.stacks[0].fc_2_biases()[0], -9);
+        assert_eq!(net.header.arch_id, ARCH_STRING);
+    }
+
+    #[test]
+    fn a_wrong_version_is_refused() {
+        let mut p = Parts::valid();
+        p.version = 0x7af3_2f17;
+        assert!(reason(parse(&p.bytes())).contains("version mismatch"));
+    }
+
+    #[test]
+    fn another_networks_header_hash_is_refused_not_warned_about() {
+        let mut p = Parts::valid();
+        p.hash = 0x3C20_3B32;
+        let why = reason(parse(&p.bytes()));
+        assert!(why.contains("0x3c203b32"), "{why}");
+        assert!(why.contains("0x684f7658"), "{why}");
+    }
+
+    #[test]
+    fn a_non_empty_architecture_string_is_refused() {
+        let mut p = Parts::valid();
+        p.arch = b"ModelType=SFNNWithoutPsqt".to_vec();
+        assert!(reason(parse(&p.bytes())).contains("architecture string of 25 bytes"));
+    }
+
+    #[test]
+    fn a_threat_profile_other_than_23_is_refused() {
+        let mut p = Parts::valid();
+        p.profile = 3;
+        assert!(reason(parse(&p.bytes())).contains("threat block profile 3"));
+    }
+
+    #[test]
+    fn a_feature_transformer_without_the_leb128_magic_is_refused() {
+        let mut p = Parts::valid();
+        p.raw_ft = true;
+        assert!(reason(parse(&p.bytes())).contains("LEB128 magic"));
+    }
+
+    #[test]
+    fn trailing_bytes_and_a_short_file_are_refused() {
+        let mut p = Parts::valid();
+        p.trailing = 1;
+        assert!(matches!(
+            parse(&p.bytes()),
+            Err(NnueError::SizeMismatch { .. })
+        ));
+        let bytes = Parts::valid().bytes();
+        assert!(matches!(
+            parse(&bytes[..bytes.len() - 1]),
+            Err(NnueError::SizeMismatch { .. })
+        ));
+        // Cut inside the threat block.
+        assert!(matches!(
+            parse(&bytes[..bytes.len() / 2]),
+            Err(NnueError::SizeMismatch { .. }) | Err(NnueError::InvalidFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn a_wrong_section_hash_is_a_warning_as_in_the_reference() {
+        let mut bytes = Parts::valid().bytes();
+        let ft_hash_at = 12;
+        bytes[ft_hash_at] ^= 0xFF;
+        let (_, warnings) = parse(&bytes).expect("section hashes only warn");
+        assert_eq!(warnings, vec![SECTION_HASH_WARNING.to_string()]);
     }
 }

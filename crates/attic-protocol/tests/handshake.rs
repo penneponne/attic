@@ -15,7 +15,7 @@ fn drive(input: &str) -> String {
 fn full_usi_to_usiok_golden() {
     let out = drive("usi\nquit\n");
     let expected = "\
-id name Attic 9.80git\n\
+id name Attic 9.96git\n\
 id author Kei Ishida <ishida.kei@gmail.com>\n\
 option name USI_Hash type spin default 1024 min 1 max 33554432\n\
 option name Threads type spin default 4 min 1 max 1024\n\
@@ -57,9 +57,19 @@ option name NumaPolicy type string default auto\n\
 option name USI_Ponder type check default false\n\
 option name Stochastic_Ponder type check default false\n\
 usiok\n";
+    // The scale's default is the evaluator's: 16, or Sirius's 26 under the threat shape.
+    let expected = expected.replace(
+        "option name FV_SCALE type spin default 16 ",
+        &format!(
+            "option name FV_SCALE type spin default {} ",
+            attic_search::FV_SCALE_DEFAULT
+        ),
+    );
     assert_eq!(out, expected);
 }
 
+// A hand-crafted shape reads no file, so there is nothing for this to fail on.
+#[cfg(not(feature = "hce"))]
 #[test]
 #[cfg_attr(miri, ignore)]
 fn isready_without_network_reports_load_failure() {
@@ -73,6 +83,23 @@ fn isready_without_network_reports_load_failure() {
     assert!(
         !out.contains("readyok"),
         "readyok must not appear on a failed load: {out:?}"
+    );
+}
+
+// What the test above is for, turned around: the coefficients are compiled in,
+// so the same missing `EvalDir` is no obstacle and `isready` answers.
+#[cfg(feature = "hce")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn isready_needs_no_network_file() {
+    let out = drive("isready\nquit\n");
+    assert!(
+        out.contains("readyok\n"),
+        "expected readyok with no file to load, got: {out:?}"
+    );
+    assert!(
+        !out.contains("eval load failed"),
+        "a shape with no file cannot fail to load one: {out:?}"
     );
 }
 
@@ -98,11 +125,21 @@ fn oversized_line_emits_command_too_long() {
 #[cfg_attr(miri, ignore)]
 fn full_handshake_then_setoption_then_quit() {
     let out = drive("usi\nsetoption name USI_Hash value 256\nisready\nquit\n");
-    assert!(out.starts_with("id name Attic 9.80git\n"));
+    assert!(out.starts_with("id name Attic 9.96git\n"));
     assert!(out.contains("usiok\n"));
     assert!(!out.contains("rejected"));
-    assert!(out.contains("info string eval load failed:"));
-    assert!(!out.contains("readyok"));
+    // The default `EvalDir` has no `nn.bin` for a network shape; a hand-crafted
+    // one reads no file and gets as far as `readyok`.
+    #[cfg(not(feature = "hce"))]
+    {
+        assert!(out.contains("info string eval load failed:"));
+        assert!(!out.contains("readyok"));
+    }
+    #[cfg(feature = "hce")]
+    {
+        assert!(!out.contains("eval load failed"));
+        assert!(out.contains("readyok\n"));
+    }
 }
 
 #[test]

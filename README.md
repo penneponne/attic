@@ -1,404 +1,165 @@
 # attic-shogi
 
-将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) の Rust
-移植です。後述の相違点を除いて移植しています。
+Rust で書かれた、[YaneuraOu](https://github.com/yaneurao/YaneuraOu) の探索部の互換エンジンです。
 
-移植元の上流コードは YaneuraOu のコミット
-`d47c9bfb94210fb1f9b741d5ee16ce081b35cacd` (V9.80) の状態を基準にしています。
+基準は [V9.96](https://github.com/yaneurao/YaneuraOu/commit/b707119bbeeeb1972806c3371545d6056b30e061)（`b707119b`）です。以下で YaneuraOu と書いたものは、特に断らない限りこの版を指します。
 
-本 README はバージョン番号の更新に合わせて更新しています。それ以外のタイミングでは、
-上記の移植元コミットより後の変更を本リポジトリが含んでいる場合があります。
+バージョン番号は、YaneuraOu のどこまでを取り込んだかを表します。このワークスペースは 9.96.0 で、`usi` の `id name` は `Attic 9.96git` です。以下の表のうち、V9.80 で測ったものにはそう書いてあります。
 
-> 名称について
-> 公開リポジトリ名は `attic-shogi`、ビルドされるバイナリ名は `attic`、USI の
-> `id name` は `Attic 9.80git` です。
+## コマンド
 
-## ライセンスと帰属
+USI プロトコルを標準入出力で話します。引数なしで `attic` を起動すると、コマンドの入力待ちになります。
 
-本ソフトウェアは GNU General Public License v3（GPLv3） で配布されます。全文は
-[`LICENSE`](LICENSE) を参照してください。
+| コマンド                                                                       | 説明                                                                                                                          |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `usi`                                                                          | エンジン情報とオプション一覧を出力し、`usiok` を返す                                                                          |
+| `isready`                                                                      | 定跡と評価関数の `<EvalDir>/nn.bin` を読み込み、`Threads` / `USI_Hash` / `NumaPolicy` を適用して、成功すれば `readyok` を返す |
+| `setoption name <名前> value <値>`                                             | オプションを設定する。一覧は `usi` が出力する                                                                                 |
+| `usinewgame`                                                                   | 新規対局の開始                                                                                                                |
+| `position [startpos \| sfen <SFEN>] [moves <手>]`                              | 局面を設定する                                                                                                                |
+| `go`                                                                           | 探索を開始し、`bestmove` を返す                                                                                               |
+| `stop`                                                                         | 探索を停止する                                                                                                                |
+| `ponderhit`                                                                    | 先読みが的中したことを通知する                                                                                                |
+| `gameover`                                                                     | 対局の終了                                                                                                                    |
+| `quit`                                                                         | 終了する                                                                                                                      |
+| `bench [ttSizeMB] [threads] [limit] [default\|current\|<fenFile>] [limitType]` | 固定条件で NPS を計測する。引数はすべて省略でき、既定値は置換表 1024 MB、1 スレッド、`limit` 15000、`limitType` は `movetime` |
 
-本ソフトウェアは GPLv3 で公開されている YaneuraOu の派生物です。移植元の著作権は
-yaneurao 氏および YaneuraOu の各コントリビューターに帰属します。上流のソースコードは
-以下で公開されています。
+## YaneuraOu との互換性
 
-- YaneuraOu: <https://github.com/yaneurao/YaneuraOu>
+同じ局面・同じ条件で探索したときに、各反復の深さ・評価値・ノード数・読み筋と `bestmove` が YaneuraOu と行単位で一致することを目指しています。確認できた範囲は次のとおりで、これ以外は確認していません。
 
-## 対応環境
+一致を確かめるのは、YaneuraOu の `make normal`(千日手を 4 回目の出現で判定する構成)に合わせた次のビルドだけです。`ref_check_time` は `go nodes N` の止まる位置を YaneuraOu に合わせます。`quick-draw` は YaneuraOu の `ENABLE_QUICK_DRAW`(`FOR_TOURNAMENT` のビルドで有効)に当たるので、外します。
 
-- Linux x86_64 （Ubuntu 26.04 相当を想定）。他の OS は対象外です。WSL2 上の
-  Ubuntu でも同じ手順で動作します。
-- 評価関数（NNUE）の計算に SIMD 実装を使うかは、ビルド時に決まります。実行時の
-  CPU 判定は行いません。選択の基準はビルドが有効化している CPU 機能で、AVX-512 の
-  F + BW が有効なら特徴量変換器と要素単位の演算が SIMD 実装になり、さらに VNNI も
-  有効ならレイヤースタックをまとめて計算する処理も SIMD 実装になります。AVX-512 の
-  F + BW が無くても AVX2 が有効なら、特徴量変換器は AVX2 実装になります。KP / HalfKP の
-  全結合層は、AVX-512 の有無にかかわらず AVX2 実装で、AVX-VNNI が有効なら 256 ビット幅の
-  `vpdpbusd` を使います。どれも有効でなければスカラ実装です。`sym_…` の 2 構成には
-  手書きの SIMD 実装がなく、スカラ実装で計算します。本リポジトリは
-  `-C target-cpu=native` でビルドする（[ビルドと実行](#ビルドと実行)参照）ため、
-  実際に選ばれる実装はビルドしたマシンの CPU で決まります。
-- どちらの実装が選ばれても、評価値はビット単位で一致します（近似ではなく同じ値を返すことを、SIMD とスカラの等価性テストで検証しています）。
-- 生成されたバイナリはビルドしたマシンの CPU 向けです（[ビルドと実行](#ビルドと実行)参照）。
+```sh
+cargo build --release -p attic --no-default-features --features <shape>,ref_check_time
+```
+
+測り方は、1 局面あたり 10 万ノード、置換表 16 MB、1 スレッドで探索した 16,384 局面のうち、全行(`time` / `nps` / `hashfull` を除く)と `bestmove` が YaneuraOu と一致した局面を数えています。探索ごとに `usinewgame` → `isready` → `position` → `go nodes 100000` を送ります。
+
+### V9.96(`b707119b`)で測ったもの
+
+比較先は YaneuraOu V9.96 の `b707119b`(`make normal TARGET_CPU=AVX2 COMPILER=g++`、`EXTRA_LDFLAGS=-static`)です。Attic は、`ishidakei/main`(`e16990e`)を `develop`(`6e079d9`)にマージした時点のソース(`crates/*/src` はそれ以降変わっていません)で、musl 静的リンク、`-C target-cpu=x86-64-v3` のビルドです。AVX-512 のカーネルは通りません。
+
+| 評価関数                  |   一致 |  総数 |   一致率 |
+| ------------------------- | -----: | ----: | -------: |
+| `nnue_kp_256x2_32_32`     |  16384 | 16384 | 100.000% |
+| `nnue_halfkp_256x2_32_32` |  16384 | 16384 | 100.000% |
+| 上記以外                  | 未確認 |     — |        — |
+
+V9.96 追従のあとに測り直したのはこの 2 行だけです。次の節の表は V9.96 に追従する前の Attic で測ったもので、残りの評価関数が V9.96 でも一致するかは確かめていません。
+
+### V9.80(`d47c9bfb`)のときに測ったもの
+
+次の表は **V9.80 に基準を置いていた時点の Attic** で測ったもので、V9.96 では測り直していません(`nnue_kp_256x2_32_32` と `nnue_halfkp_256x2_32_32` の行は、上の V9.96 の表が新しい値です)。比較先は、`nnue_` の 4 行が YaneuraOu V9.80、`sfnn_` の 3 行が shielune 版 YaneuraOu（`8b55d5d`）です。V9.80 には層スタックの選び方がないためで、shielune 版は `least_significant_square_bb` の 1 行を V9.80 の形に戻して使っています。`sfnn_halfkahm2_1024_15_64_progress8ek` の行は、tatara で `progress8ek` の規則で学習したネット（8 superbatch の試作）で比べています。Attic は、`sfnn_` の 3 行が `f5dfd5c`、`nnue_` の 4 行が `770a060` です。
+
+| 評価関数                                   |   一致 |  総数 |   一致率 |
+| ------------------------------------------ | -----: | ----: | -------: |
+| `nnue_kp_256x2_32_32`                      |  16384 | 16384 | 100.000% |
+| `nnue_halfkp_256x2_32_32`                  |  16384 | 16384 | 100.000% |
+| `nnue_halfkp_128x2_32_32`                  |  16384 | 16384 | 100.000% |
+| `nnue_halfkp_768x2_16_64`                  |  16384 | 16384 | 100.000% |
+| `sfnn_halfkahm2_1024_15_64_progress8kpabs` |  16384 | 16384 | 100.000% |
+| `sfnn_halfkahm2_2304_15_64_progress8ek`    |  16384 | 16384 | 100.000% |
+| `sfnn_halfkahm2_1024_15_64_progress8ek`    |  16384 | 16384 | 100.000% |
+| 上記以外                                   | 未確認 |     — |        — |
+
+shielune 版の `least_significant_square_bb` を戻さずに比べると、`sfnn_halfkahm2_1024_15_64_progress8kpabs` は 31 局面、`sfnn_halfkahm2_2304_15_64_progress8ek` は 54 局面で食い違います。桂の SEE で桂が 2 枚同時に消える、参照側の挙動によるものです。
+
+### `sfnn_halfkahm2_1024_15_64_progress8ek`
+
+この構成は `sfnn_halfkahm2_1024_15_64_progress8kpabs`（NAGISA V3）と、ファイルの形も進行度の係数も同じで、層スタックの選び方だけが違います。相入玉の局面（先手玉が 1〜5 段、後手玉が 5〜9 段）を 9 番目の層スタックに割り当てます。規則は `sfnn_halfkahm2_2304_15_64_progress8ek` と同じです。どちらの規則で学習したネットかは、ファイルから分かりません。手元の、相入玉の bucket つきで学習したネット（tatara で学習して変換したもの）は、アーキテクチャ名もヘッダと FT のハッシュも V3 と同じでした。使うネットに合う構成を、ビルドで選んでください。
+
+- 配布ディレクトリの `eval_options.txt` に `LS_BUCKET_MODE` の行があっても、attic にはこのオプションがないため、`Error : option name not found : LS_BUCKET_MODE` を出して無視します。規則はビルドで決まります。手元の V3 の配布物は `progress8kpabs`、試作のネットのディレクトリは `progress8ek` と書いていました。
+
+### `sfnn_halfkahm2_threat_1024_15_64_8gp`
+
+Sirius の `nn.bin`（300,147,971 バイト。sha256 は `2d2f8e94…` で始まります）を、そのまま読む構成です。HalfKA_hm2 の特徴量に、盤上の駒どうしの利き（threat 特徴量）を足します。成り駒を含む玉以外の駒がすべて攻め手になり、飛び駒は最初に当たる駒で止まります。層スタックは 8 つで、手駒と敵陣の駒から整数で出す進行度と、玉の位置と守りの駒の数から選びます。境界の近くでは、隣の層スタックとの内分をとります。`FV_SCALE` の既定値は 26 で、評価値は ±31753 に収めます。`progress.bin` は使いません。
+
+ヘッダのハッシュが `0x684f7658` でない、アーキテクチャ文字列の長さが 0 でない、threat のプロファイルが 23 でない、のどれかなら、理由を添えて読み込みを拒否します。他の SFNN の構成と違い、警告を出して先へ進むことはしません。
+
+静的評価の比較先は、Sirius 本体の `e` コマンド（手番側から見た値）です。探索は、Sirius 本体ではなく、同じ評価関数を載せた YaneuraOu と照合しています（下記）。Sirius の探索との一致は確認していません。確認できたのは次のとおりです。
+
+**静的評価**は、4 つの局面集合のすべてで Sirius と一致しました。次の 3 つのビルドのどれでも同じ結果です。
+
+- スカラー: `-C target-cpu=x86-64-v2`（AVX2 なし）
+- AVX2: `-C target-cpu=x86-64-v3`
+- ネイティブ: このマシン（Core Ultra 7 265KF）の AVX2 と AVX-VNNI。AVX-512 はありません
+
+| 局面集合 | 内容                                  |   一致 |  総数 |
+| -------- | ------------------------------------- | -----: | ----: |
+| fixture  | 通常の局面                            |  16384 | 16384 |
+| probe    | 入玉、駒の改変、駒の山                |   3000 |  3000 |
+| packed   | 利きの一覧が 128 件の上限に達する局面 |    500 |   500 |
+| moves    | 局面に指し手を進めた後                |   2000 |  2000 |
+
+局面は、8 つの層スタックのすべてを通ります。層スタックごとの局面数は、順に 15,717、2,715、1,002、600、177、27、228、1,418 です。
+
+**差分更新**は、手ごとに、全計算した累積値と一致します。利きの一覧も、全計算で作ったものと行の並びまで一致します。
+
+- Sirius の局面集合の局面と、手で作った局面から始めた、ランダムな対局 477 局、計 40,049 手。取る手 12,021、打つ手 9,064、成る手 3,760、玉の手 11,551（うち、玉が左右反転の境界をまたぐ手が 2,026）を含みます。利きの一覧が上限に達した手が 77、2 つの視点で反転の有無が違う手が 19,940 です。3 つのビルドで同じ件数でした。
+- 利きの一覧の（攻め手、対象）の組と並びは、別に書いた素朴な列挙（盤面の配列を走査）とも照合しています。行の番号は、上の Sirius との一致で確かめています。
+- moves の 2,000 局面は、指し手を差分更新で進めた先の値も Sirius と一致しました（計 7,022 手）。
+
+**YaneuraOu との探索の一致**は、上流 `b707119b` に Sirius の評価関数（読み込み、threat 特徴量、層スタックの選択と内分、FV_SCALE 26）を足したビルド（`make normal`、`TARGET_CPU=AVX512VNNI`、静的リンク）と、Attic の `--no-default-features --features sfnn_halfkahm2_threat_1024_15_64_8gp,ref_check_time` を、上の表と同じ測り方（16,384 局面、`go nodes 100000`、Threads 1、USI_Hash 16）で突き合わせました。16,384 局面すべてで、全行が一致しました。どちらも Xeon Silver 4210（AVX-512 あり）で実行しています。この YaneuraOu のビルドは上流にはないため、上の表には入れていません。
+
+**探索**は、差分更新を使うビルドと、毎手累積値を作り直すビルド（`threat_force_refresh`）で、結果が一致しました。Sirius の局面集合から取った 584 局面を `go depth 9`（Threads 1、USI_Hash 16）で探索し、`info` 行（`time`・`nps`・`hashfull` を除く）と `bestmove` の計 5,648 行を比べています。同じバイナリを 2 回走らせても一致するので、探索の再現性は崩れていません。`scripts/sirius_search_check.py` で再現できます。
+
+**速度**は、上の 584 局面（depth 9、Threads 1）を、このマシンの P コア 1 つに固定して 3 回測ると、644,520〜693,304 nps（約 674 万ノード）でした。測定中、このマシンでは他のプロセスも動いていました。差分更新を使わず毎手作り直すビルドは、同じ条件で 132,875 と 187,754 nps で、ばらつきが大きく、比としては使えません。YaneuraOu との比は測っていないので、`探索速度` の表には入れていません。
+
+AVX-512 を持つ CPU（Xeon Silver 4210、`-C target-cpu=native`）でも、静的評価の 4 つの局面集合、差分更新の moves 2,000 局面、差分更新と作り直しの探索の比較（398 局面、`go depth 9`）が、すべて一致しました。この構成に AVX-512 のカーネルはなく、AVX-512 のマシンでも AVX2 のカーネルが動きます。
+
+確認していないこと:
+
+- 2 スレッド以上での探索。
+- `FV_SCALE` が 26 以外のときの Sirius の値。Sirius と照合したのは 26 の値だけです。26 以外の割り算と ±31753 の丸めは、Attic 自身の出力（`FV_SCALE 1`）と比べています。fixture の最大値は 6,992 で、丸めに届く局面はありません。
+
+Sirius の `nn.bin` と局面ファイルは配布物に含まれません。環境変数 `ATTIC_SIRIUS_REF` がないと、次のテストは通知を出して成功扱いで飛ばします。そのディレクトリには `eval/nn.bin`、`fixture/`、`eval-re/` を置きます。カーネルはコンパイル時に決まるので、スカラーや AVX2 を試すには `RUSTFLAGS` で `target-cpu` を指定します。
+
+```sh
+ATTIC_SIRIUS_REF=<sirius-ref> RUSTFLAGS="-C target-cpu=x86-64-v2" \
+  cargo test --release -p attic-eval --features sfnn_halfkahm2_threat_1024_15_64_8gp \
+  --test sirius_parity --test sirius_incremental --test sirius_fv_scale -- --nocapture
+```
+
+## 探索速度
+
+**この節の値は V9.80 に基準を置いていた時点の Attic と YaneuraOu V9.80 で測ったもの**で、V9.96 では測り直していません。V9.96 の追従で探索・置換表・履歴表が変わっているので、速度比は変わっている可能性があります。
+
+YaneuraOu を 1 とした比です。YaneuraOu 側も同じ評価関数で動かしています。表は、ビルドの方法ごとに測ったうち速い方の値です。1 スレッドで、1 局面 10 万ノード × 128 局面を交互に測定しました。
+
+| ビルド                                     | コマンド                | 速度比 |
+| ------------------------------------------ | ----------------------- | ------ |
+| `nnue_kp_256x2_32_32`                      | `cargo xtask build-pgo` | 1.053  |
+| `nnue_halfkp_256x2_32_32`                  | `cargo xtask build-pgo` | 1.022  |
+| `nnue_halfkp_128x2_32_32`                  | `cargo xtask build-pgo` | 0.998  |
+| `nnue_halfkp_768x2_16_64`                  | `cargo xtask build-pgo` | 1.008  |
+| `sfnn_halfkahm2_1024_15_64_progress8kpabs` | `cargo xtask build-pgo` | 0.424  |
+| `sfnn_halfkahm2_2304_15_64_progress8ek`    | `cargo xtask build-pgo` | 0.416  |
+
+SFNN の 2 つは、YaneuraOu 側が shielune 版です。遅い原因は調べていません。AVX-512 のカーネルと、表にない評価関数の速度は測っていません。
 
 ## 対応している評価関数
 
-評価関数の構成は、ビルド時に 1 つだけ選びます。`attic` の feature で指定し、0 個または
-2 個以上を指定するとコンパイルエラーになります（[ビルドと実行](#ビルドと実行)参照）。
-実行時に切り替えることはできないので、別の構成を使うときはビルドし直してください。
-いずれの構成も、評価関数ファイルは `<EvalDir>/nn.bin` として読み込みます
-（[評価関数ファイル](#評価関数ファイルnnbin)参照）。
-
-| feature | 特徴量（次元数） | 変換器 | 全結合層 | 層スタック | `nn.bin` 以外に必要なファイル |
-| --- | --- | --- | --- | --- | --- |
-| `sfnn_halfkahm2_1536_15_32_k3k3` | HalfKA_hm2（73,305） | 1536×2 | 15 → 32 → 1 | 9（両玉の段で選択） | なし |
-| `sfnn_halfkahm2_2304_15_64_progress8ek` | HalfKA_hm2（73,305） | 2304×2 | 15 → 64 → 1 | 9（進行度 8 + 入玉 1） | `progress.bin` |
-| `nnue_kp_256x2_32_32` | K+P（1,710） | 256×2 | 32 → 32 → 1 | 1 | なし |
-| `nnue_halfkp_256x2_32_32` | HalfKP（125,388） | 256×2 | 32 → 32 → 1 | 1 | なし |
-| `sym_kp_128x2_512` | K+P（1,710） | 128×2 | 512 → 1 | なし | なし |
-| `sym_halfkp_128x2_512` | HalfKP（125,389） | 128×2 | 512 → 1 | なし | なし |
-
-- 前の 2 つ（`sfnn_…`）は SFNN 系の構成です。`sfnn_halfkahm2_1536_15_32_k3k3`（以下
-  SFNN-1536）は、YaneuraOu を `YANEURAOU_EDITION=YANEURAOU_ENGINE_SFNN1536` でビルド
-  した場合と同じ構成です。`sfnn_halfkahm2_2304_15_64_progress8ek` は、shielune 版の
-  YaneuraOu（<https://github.com/shielune/YaneuraOu>）の
-  `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` に当たる構成です。
-  移植元の基準コミットに含まれているかは確認していません。
-- `nnue_kp_256x2_32_32` は YaneuraOu の `YANEURAOU_ENGINE_NNUE_KP256` に、
-  `nnue_halfkp_256x2_32_32` は `YANEURAOU_ENGINE_NNUE` に当たる構成です。
-- `sfnn_halfkahm2_2304_15_64_progress8ek` は、層スタックの選択に使う係数を `nn.bin` の外の
-  `progress.bin` から読みます。`nn.bin` と同じディレクトリに置く、ヘッダなしの
-  `f64[81][1548]` のファイルです。`progress.bin` が読めなかった場合は警告を出し、
-  すべての局面を層スタック 0 で評価します。評価値は誤ったものになるので、この構成を
-  使うときは必ず置いてください。
-- 末尾の 2 つ（`sym_…`）は、移植元の YaneuraOu には対応する構成がない、Manaka 独自の
-  評価関数です。特徴量の番号付けだけを YaneuraOu の KP / HalfKP から借り、特徴量の
-  冪和（3 次まで）を作って RMS で正規化します。ファイルは `nn.bin` と同じコンテナ形式で、
-  量子化した形式と f32 の形式のどちらも読めます。HalfKP 版の次元数が YaneuraOu の
-  HalfKP（125,388）より 1 つ多い 125,389 なのは、Manaka がパディング（詰め物）用の行を
-  1 行足しているためです。
-
-### 移植元との一致の検証状況
-
-「移植元と一致」とは、同じ局面・同じ条件で探索したときに、各反復の深さ・評価値・ノード数・
-読み筋と `bestmove` が YaneuraOu 9.80 と行単位で同じになることを指します。
-一致を確かめたのは次の範囲だけで、他の構成の探索は検証していません。
-
-| 構成 | 確認した内容 |
-| --- | --- |
-| `nnue_kp_256x2_32_32` | 16,384 局面（1 局面 10 万ノード、置換表 16 MB）の全行が一致 |
-| `nnue_halfkp_256x2_32_32` | 18 局面 × 4 段階で一致（局面数は KP256 より大幅に少ない） |
-| 上記以外 | 未検証（高速化後の探索を YaneuraOu と突き合わせていない） |
-
-- `nnue_kp_256x2_32_32` の 16,384 局面の一致は、
-  `--no-default-features --features nnue_kp_256x2_32_32,ref_check_time` でビルドした
-  ときのものです。`--no-default-features` は、既定で有効な `quick-draw`
-  （YaneuraOu の `ENABLE_QUICK_DRAW` に当たる、千日手の判定方式の切り替え）を外します。
-  `ref_check_time` は、`go nodes N` の時間チェックを YaneuraOu と同じ位置に移します。
-  YaneuraOu の `make normal` ビルドと突き合わせるための構成で、通常の対局用には不要です。
-- リポジトリに入っているテスト
-  （[`crates/attic-protocol/tests/yaneuraou_parity.rs`](crates/attic-protocol/tests/yaneuraou_parity.rs)）
-  は、16,384 局面のうちの 160 局面を使います。評価関数ファイルは本リポジトリに含まれて
-  いないので、`ATTIC_KP256_NN` にパスを設定するか `eval/nn.bin` に置いてください。見つからないとき
-  は、通知を出して成功扱いにします（`ATTIC_REQUIRE_PARITY=1` を付けると失敗にします）。
-- GitHub Actions の CI（[`integration.yaml`](.github/workflows/integration.yaml)）は、
-  上の 6 構成と、この一致用の構成の計 7 つを、それぞれ clippy・ビルド・テストにかけます。
-  CI には評価関数ファイルがないので、ファイルを読むテストは通知を出して飛ばします。
-  CI が通っても、各構成が正しく評価できることまでは確かめていません。
-- USI 経由でエンジンを起動する統合テスト（`crates/attic-protocol/tests/`）のうち、合成した
-  `nn.bin` を使う 63 件は、SFNN-1536 のビルドでしか動きません。合成する `nn.bin` が
-  SFNN-1536 の形式で、他の構成では読み込めないためです。
-
-## ビルドと実行
-
-ビルドには `rustup`（Rust のインストーラ兼ツールチェイン管理ツール）が必要です。
-未導入の場合は公式の手順（<https://rustup.rs/>）でインストールしてください。また、
-リンクに C コンパイラを使うため、Ubuntu では `build-essential` パッケージも
-入れておいてください（`sudo apt install build-essential`）。
-
-ビルド時に使用する Rust ツールチェインのバージョンを [`rust-toolchain.toml`](rust-toolchain.toml) に明記しています。
-そのため、後述するビルドの実行時に、`rustup` が該当バージョンを自動的にダウンロードします。
-PGO のプロファイル統合に使う `llvm-profdata`（`llvm-tools` コンポーネント）も同じファイルで
-指定しているので、あわせて入ります。
-
-クローンしたディレクトリに移動してから、リリースビルドを行います。既定のリリースビルドは
-PGO（プロファイルに基づく最適化）付きで、`cargo xtask build-pgo` で行います。
-
-```bash
-cargo xtask build-pgo --features <評価関数の構成>
-```
-
-評価関数の構成（`attic` の feature）は 1 つ選ぶ必要があります。選べる名前は
-[`crates/attic-eval/Cargo.toml`](crates/attic-eval/Cargo.toml) の `[features]` にあります。
-たとえば次のように渡します。
-
-```bash
-cargo xtask build-pgo --no-default-features --features nnue_kp_256x2_32_32,ref_check_time --eval-dir /path/to/eval
-```
-
-- 次の 3 段階を順に実行します。
-  1. プロファイルを採取する計測用ビルド（`target/pgo/instrumented` 以下）。
-  2. 計測用バイナリに USI で探索させる学習走行。局面は
-     [`crates/xtask/pgo-positions.sfen`](crates/xtask/pgo-positions.sfen) の 256 局面で、
-     1 局面あたり `go nodes 100000`、スレッド数 1、置換表 16 MB です。
-  3. 採取したプロファイルを `llvm-profdata` で統合（`target/pgo/merged.profdata`）し、
-     それを使う本ビルド。
-- 学習走行は評価関数ファイルを読み込みます。`eval/nn.bin` を置くか、`--eval-dir` で
-  `nn.bin` のあるディレクトリを指してください。見つからないときは、ビルドを始める前に
-  エラーで止まります（PGO なしのバイナリを黙って作ることはしません）。
-- 学習走行のエンジンが異常終了したときや、`bestmove` が返らないとき、プロファイルが
-  1 つも出なかったときもエラーで止まります。
-- ビルドされる実行ファイルは `target/release/attic` です。学習の局面と探索のノード数は
-  `--positions` と `--nodes` で差し替えられ、`--keep-profile` を付けると統合前の
-  `.profraw` を残します。
-- 所要時間: 手元の機械（Intel Core Ultra 7 265KF、コア 3 つに制限、`target` が空の状態、
-  評価関数は 0.9 MB 弱の `nnue_kp_256x2_32_32`）で 1 分 10 秒前後でした。内訳は計測用
-  ビルド約 10 秒、学習走行約 52 秒、本ビルド約 9 秒です。学習走行の時間は評価関数の
-  大きさと CPU の速さで変わります。他の構成での所要時間は測っていません。
-- 環境変数 `RUSTFLAGS` を設定している場合は、その値に `-Cprofile-generate=...` /
-  `-Cprofile-use=...` を足して使います。設定していない場合は `cargo build --config` で
-  足すので、次の項目の `-C target-cpu=native` はそのまま効きます。
-- PGO が不要なら、従来どおり `cargo build --release` でもビルドできます（`--features` などは
-  同じように渡します）。同じ構成の PGO 付きと PGO なしを、手元の機械で 128 局面 × 10 万ノード
-  （1 コア）を交互に 3 回ずつ測ったところ、PGO 付きの方が毎回速く、knps は PGO なしより
-  2.9%、3.4%、5.8% 高い結果でした（探索ノード数はどちらも 12,808,906 で一致）。
-- [`.cargo/config.toml`](.cargo/config.toml) が全プロファイルに
-  `-C target-cpu=native` を適用します。生成されるバイナリはビルドしたマシンの
-  CPU に最適化されるため、実行するマシン上でビルドしてください。
-
-エンジンとのやり取りは、標準入出力上の USI プロトコルで行います。引数なしで
-起動すると、USI コマンドの入力待ちになります。
-
-```bash
-./target/release/attic
-```
-
-正しくビルドできたかは、`usi` コマンドへの応答で確認できます。
-
-```bash
-printf 'usi\nquit\n' | ./target/release/attic
-```
-
-`id name` / `id author` と各 `option` 行、最後に `usiok` が出力されれば成功です。
-
-### Windows の USI GUI から WSL2 経由で使う
-
-USI は標準入力／標準出力でやり取りするだけなので、`wsl.exe` を介してエンジンを起動する
-Windows 側の `.bat` を用意すれば、それをエンジンの実行ファイルとして登録できます
-（`.bat` を登録できるかどうかは GUI 次第です）。
-
-```bat
-@echo off
-set REPO=/home/<user>/<clone-dir>
-wsl.exe --cd %REPO% ^
-  -- ./target/release/attic
-```
-
-- `--cd` によりリポジトリのルートが作業ディレクトリになるため、`EvalDir` の既定値
-  （`eval`）はリポジトリの `eval/` を指します。別の方法として、GUI のエンジン設定で
-  `EvalDir` に WSL 側の絶対パスを指定してもかまいません。
-- WSL のディストリビューションを複数インストールしている場合は、`-d <distribution>`
-  で使用するものを選べます。
-
-この手順は本リポジトリでは動作確認していません。
-
-### どの NNUE 実装が選ばれたかを確認する
-
-評価関数の SIMD 実装はビルド時に固定される（[対応環境](#対応環境)参照）ので、選択結果は
-できあがったバイナリを逆アセンブルすれば確認できます。確認する項目は次の 3 つです。
-
-```bash
-objdump -d target/release/attic | grep -c '%zmm'
-objdump -d target/release/attic | grep -c vpdpbusd
-objdump -d target/release/attic | grep -c vpmaddubsw
-```
-
-- `%zmm`（512 ビットのレジスタ）が 0 以外なら、AVX-512 の実装が選ばれています。
-  AVX-512 の有無は、この項目で判別してください。
-- `vpdpbusd`（VNNI の内積命令）が 0 以外であることは、AVX-512 を意味しません。
-  KP / HalfKP の全結合層は、AVX-VNNI が有効なら 256 ビット幅の `vpdpbusd` を使うため、
-  AVX-512 を持たない CPU 向けのビルドでも出現します。`vpdpbusd` の行に `%zmm` が
-  あれば AVX-512 版、`%ymm` なら AVX-VNNI 版です。
-- `vpmaddubsw`（AVX2 の内積命令）が 0 以外で、上の 2 つが 0 なら、AVX2 実装です。
-  AVX2 だけが有効なビルドでは、KP / HalfKP の全結合層がこの命令を使います。
-  `%ymm` の数は、コンパイラが自動で SIMD 化した部分にも出るので、判別には使えません。
-- 3 つとも 0 なら、スカラ実装です。選ばれなかった側の実装は、どこからも
-  呼ばれないため、リリースビルドのデッドコード除去で実行ファイルから取り除かれます。
-
-実測例:
-
-| ビルド | CPU | `%zmm` | `vpdpbusd` | `vpmaddubsw` |
-| --- | --- | --- | --- | --- |
-| `sfnn_halfkahm2_1536_15_32_k3k3`、`-C target-cpu=native` | AMD EPYC 9B45（Zen 5） | 2382 | 29 | 未測定 |
-| `sfnn_halfkahm2_1536_15_32_k3k3`、`-C target-cpu=x86-64-v2` | 同上 | 0 | 0 | 未測定 |
-| `nnue_kp_256x2_32_32`、`-C target-cpu=native` | Intel Core Ultra 7 265KF（AVX-VNNI あり、AVX-512 なし） | 0 | 97（すべて `%ymm`） | 未測定 |
-| `nnue_kp_256x2_32_32`、`-C target-cpu=x86-64-v3` | 同上 | 0 | 0 | 105 |
-| `nnue_kp_256x2_32_32`、`-C target-cpu=x86-64-v2` | 同上 | 0 | 0 | 0 |
-
-上の 2 行は以前の測定で、当時の唯一の構成が SFNN-1536 でした。下の 3 行は、この README を
-更新した際に測りました（`--no-default-features` 付き、`--release`）。数は、ビルドしたコードに
-よって変わります。
-
-## 評価関数ファイル（`nn.bin`）
-
-本エンジンが読み込める評価関数は、ビルド時に選んだ構成のもの 1 種類だけです
-（構成の一覧は[対応している評価関数](#対応している評価関数)参照）。別の構成の `nn.bin` を
-渡しても読み込めません。評価関数ファイルは本リポジトリに含まれていないため、選んだ
-構成に合う `nn.bin` を別途用意してください。SFNN-1536（`sfnn_halfkahm2_1536_15_32_k3k3`）については、入手方法の一例として、
-YaneuraOu プロジェクトを支援する方法があります
-（<https://yaneuraou.yaneu.com/support-the-project/>）。他の構成の入手先は、本リポジトリでは
-案内していません。
-
-用意した `nn.bin` は、作業ディレクトリの `eval/nn.bin` に置いてください。`EvalDir` の
-既定値（`eval`）のまま読み込めます。
-
-### ヘッダ検証（[`crates/attic-eval/src/loader.rs`](crates/attic-eval/src/loader.rs)）
-
-読み込み時の検証は移植元に準じます。
-
-- バージョン番号が一致しない場合は読み込みを中止します（別のシリアライズ
-  形式のファイルとみなします）。
-- ファイル全体のハッシュおよび各セクション（特徴量変換器・各レイヤースタック）
-  のハッシュが一致しない場合は、`info string` で警告を出したうえで読み込みを
-  続行します。
-- アーキテクチャ文字列は読み取りますが、比較には使いません。
-
-以上は SFNN と KP / HalfKP の 4 構成の場合です。`sym_…` の 2 構成は検証が厳しく、
-アーキテクチャ文字列が、その構成の期待する文字列（量子化した形式か f32 の形式のどちらか）と
-一致しなければ読み込みを中止します。ファイル全体のハッシュと各セクションのハッシュが
-一致しない場合も、警告にとどめず読み込みを中止します
-（[`crates/attic-eval/src/manaka.rs`](crates/attic-eval/src/manaka.rs)）。
-
-### 読み込みのタイミング
-
-- `EvalDir`（既定値 `eval`）が評価関数ファイルの置かれたディレクトリを指定します。実際に
-  読み込むファイルは `<EvalDir>/nn.bin` です。
-- 読み込みは `isready` の時点で行われます。成功すると `readyok` を返します。失敗した
-  場合は `info string eval load failed: …` を出力し、`readyok` は返しません。
-
-### オプション上書きファイル
-
-エンジンは `isready` のたびに、次の 2 つのファイルをこの順で読みます（存在しない
-場合は何もしません）。
-
-1. カレントディレクトリの `engine_options.txt`
-2. `<EvalDir>/eval_options.txt`
-
-これらのファイルの各行はオプションを上書きし、そのオプションの設定を固定（FIXED）します
-（固定後は `setoption` による変更を無視します）。記法は次の 3 通りです。
-
-- `FV_SCALE 24` のような `<名前> <値>`
-- `FV_SCALE=24` のような `<名前>=<値>`
-- `option name FV_SCALE type spin default 24 …` のような完全形（`default` の値を採用）
-
-評価関数ファイルが推奨する `FV_SCALE` は、この上書きファイルを通じて適用します。
-
-## USI の使い方
-
-### オプション一覧
-
-`usi` コマンドに対して出力されるオプションは次のとおりです（宣言順）。
-
-| オプション名 | 型 | 既定値 | 意味 |
-| --- | --- | --- | --- |
-| `USI_Hash` | spin | `1024` | 置換表サイズ [MB]（1〜33554432） |
-| `Threads` | spin | `4` | 探索スレッド数（1〜、上限はコア数に応じて動的） |
-| `MultiPV` | spin | `1` | 候補手（読み筋）を出力する本数（1〜600） |
-| `EvalDir` | string | `eval` | `nn.bin` を置くディレクトリ |
-| `FV_SCALE` | spin | `16` | NNUE の出力を割って評価値にする除数（1〜128） |
-| `USI_OwnBook` | check | `true` | エンジン側で定跡を使う |
-| `NarrowBook` | check | `false` | 定跡の採用手を絞り込む |
-| `BookMoves` | spin | `16` | 定跡を適用する手数（0〜10000） |
-| `BookIgnoreRate` | spin | `0` | 定跡を無視する確率 [%]（0〜100） |
-| `BookFile` | combo | `no_book` | 使用する定跡ファイル（既定は定跡なし） |
-| `BookDir` | string | `book` | 定跡ファイルを置くディレクトリ |
-| `BookEvalDiff` | spin | `30` | 定跡採用手の評価値の許容差（0〜99999） |
-| `BookEvalBlackLimit` | spin | `0` | 先手番で定跡を採用する評価値の下限 |
-| `BookEvalWhiteLimit` | spin | `-140` | 後手番で定跡を採用する評価値の下限 |
-| `BookDepthLimit` | spin | `16` | 定跡として採用する最小の深さ（0〜99999） |
-| `BookOnTheFly` | check | `false` | 定跡を全読み込みせず逐次参照する |
-| `ConsiderBookMoveCount` | check | `false` | 定跡手の採用回数を考慮する |
-| `BookPvMoves` | spin | `8` | 定跡から出力する PV の手数（1〜246） |
-| `IgnoreBookPly` | check | `false` | 定跡照合時に手数を無視する |
-| `FlippedBook` | check | `true` | 左右反転した局面も定跡照合する |
-| `EnteringKingRule` | combo | `CSARule27` | 入玉宣言勝ちのルール |
-| `DepthLimit` | spin | `0` | 探索深さの上限（0 = 無制限） |
-| `NodesLimit` | spin | `0` | 探索ノード数の上限（0 = 無制限） |
-| `MaxMovesToDraw` | spin | `0` | 引き分けとする手数（0 = 無制限） |
-| `PvInterval` | spin | `300` | PV 出力の最小間隔 [ms]（0 = 抑制しない） |
-| `ConsiderationMode` | check | `false` | 検討モード |
-| `OutputFailLHPV` | check | `true` | fail-high/low 時にも PV を出力する |
-| `DrawValueBlack` | spin | `-2` | 先手から見た引き分けの評価値 |
-| `DrawValueWhite` | spin | `-2` | 後手から見た引き分けの評価値 |
-| `ResignValue` | spin | `99999` | 投了する評価値のしきい値 |
-| `GenerateAllLegalMoves` | check | `false` | 不成なども含む全合法手を生成する |
-| `NetworkDelay` | spin | `120` | 平均通信遅延 [ms] |
-| `NetworkDelay2` | spin | `1120` | 最悪時（時間切れ回避）の通信遅延 [ms] |
-| `MinimumThinkingTime` | spin | `2000` | 最小思考時間 [ms] |
-| `SlowMover` | spin | `100` | 思考時間の倍率 [%] |
-| `RoundUpToFullSecond` | check | `true` | 秒単位に切り上げて時間を使う（秒読み用） |
-| `NumaPolicy` | string | `auto` | NUMA ノードへの割り当て方針 |
-| `USI_Ponder` | check | `false` | 先読み（ponder）を有効化する |
-| `Stochastic_Ponder` | check | `false` | 確率的 ponder を有効化する |
-
-### 対応コマンド
-
-| コマンド | 説明 |
-| --- | --- |
-| `usi` | エンジン情報とオプション一覧を出力し `usiok` を返す |
-| `isready` | 定跡と評価関数を読み込み、成功すれば `readyok` を返す |
-| `setoption name <名前> value <値>` | オプションを設定する |
-| `usinewgame` | 新規対局の開始（出力なし） |
-| `position [startpos \| sfen <SFEN>] [moves <手> …]` | 局面を設定する |
-| `go […]` | 探索を開始し `bestmove` を返す |
-| `stop` | 探索を停止する |
-| `ponderhit` | 先読みが的中したことを通知する |
-| `gameover` | 対局終了 |
-| `quit` | 終了する |
-| `bench [ttSizeMB] [threads] [limit] [default\|current\|<fenFile>] [limitType]` | 固定条件での NPS 計測。引数はすべて省略可で、左から順に既定値（`ttSizeMB=1024`, `threads=1`, `limit=15000`, ソース `default`, `limitType=movetime`）で埋められる |
-
-コマンドライン用のサブコマンドとして、perft（指し手生成の数え上げ）も利用できます
-（[`crates/attic/src/main.rs`](crates/attic/src/main.rs)）。
-
-```bash
-attic perft startpos <depth>
-attic perft sfen <SFEN> <depth>
-attic perft sfen <SFEN> moves <m1> [<m2> …] <depth>
-```
-
-### 未対応のコマンド
-
-移植元にはデバッグ・補助用のコマンドがいくつかありますが、本エンジンでは実装して
-いません。たとえば `d`、`eval`、`moves`、`flip`、`getoption`、`compiler`、
-`unittest`、`test` などです。認識できないコマンドを受け取った場合は
-`info string unknown command: <入力行>` を出力して読み飛ばします。
-
-## 移植元との相違点
-
-移植元との主な違いは次のとおりです（いずれも本リポジトリのコードで確認できます）。
-
-- 対応環境が Linux x86_64 のみです（[対応環境](#対応環境)参照）。
-- 定跡は `.ybb`（YaneuraOu のバイナリ定跡）形式のみ読み込みます。これに合わせて
-  `BookFile` オプションの選択肢も、実際に読み込める `.ybb` の名前だけを提示します
-  （移植元は `.db` / `book.bin` の名前を並べます）。
-- 未対応の補助コマンドがあります（[未対応のコマンド](#未対応のコマンド)参照）。
-- 探索スレッドごとの履歴テーブルの確保方法が異なります。移植元は履歴テーブル群を
-  `Worker` 構造体に内蔵して 1 回の large page 確保で持ちますが、本エンジンはテーブル
-  単位の large page 確保に分けています（移植元と同じ一括確保の形は、実測で NPS が
-  約 1〜1.5% 低下したため採用していません。探索結果・出力には影響しません）。
-- 上記のような意図的な仕様差は、該当するコード箇所にコメントで明記しています
-  （例: `BookFile` の既定値を `no_book` にする分岐。
-  [`crates/attic-protocol/src/options.rs`](crates/attic-protocol/src/options.rs)）。
-
-## 移植元との性能比較
-
-参考値として、本移植（V9.70 時点）と移植元 YaneuraOu V9.70（TOURNAMENT ビルド、
-AVX-512 VNNI）を、同一マシン（AMD EPYC 9B45 = Zen 5、Linux）・同一評価関数で
-比較した結果です。
-
-- NPS（1 スレッド、固定深さの `bench`）は移植元を 1 割ほど下回ります。
-- レーティングは、互角局面から 100 局（持ち時間 2 秒+1 手 1 秒加算、1 スレッド）の
-  対局で、その速度差に見合う程度（10 前後）下回る結果でした。局数が少ないため
-  誤差は大きめです。
-- なお固定深さの探索では、ノード数が移植元と完全に一致します
-  （つまり、探索の中身は同じで、上記の差は主に速度によるものです）。
+| type | feature                               |
+| ---- | ------------------------------------- |
+| SFNN | `halfkahm2_1536_15_32_k3k3`           |
+| SFNN | `halfkahm2_1024_15_64_progress8kpabs` |
+| SFNN | `halfkahm2_1024_15_64_progress8ek`    |
+| SFNN | `halfkahm2_2304_15_64_progress8ek`    |
+| SFNN | `halfkahm2_threat_1024_15_64_8gp`     |
+| NNUE | `kp_256x2_32_32`                      |
+| NNUE | `kp_128x2_32_32`                      |
+| NNUE | `halfkp_256x2_32_32`                  |
+| NNUE | `halfkp_128x2_32_32`                  |
+| NNUE | `halfkp_768x2_16_64`                  |
+| SYNN | `token_128x2_32_32`                   |
+| SYNN | `token_256x2_32_32`                   |
+| SYNN | `kp_128x2_32_32`                      |
+| SYNN | `kp_256x2_32_32`                      |
+| SYNN | `halfkp_128x2_32_32`                  |
+| SYNN | `token_128x2_32_32_pair16`            |
+| SYNN | `token_128x2_32_32_pair16_o1`         |
+| SYNN | `token_128x2_32_32_pair16_o1_hm`      |
+| SYNN | `token_128x2_32_32_pair16_m8_f2`      |
+| HCE  | `material_17`                         |
+| HCE  | `mobility_107_57`                     |

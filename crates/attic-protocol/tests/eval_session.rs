@@ -205,7 +205,7 @@ fn synthetic_network_session_matches_direct_search_choice() {
 }
 
 /// Drive one `isready` whose heavy work is real — the `nn.bin` load and the
-/// 1024 MiB table zeroing — under a very short injected keep-alive poll, with
+/// 1024 MiB table zeroing — under a very short injected keep-alive interval, with
 /// `Threads` optionally set first, and check the keep-alive's output around it.
 /// A short `go` follows, so a worker pool that the keep-alive had disturbed
 /// would show up as a missing `bestmove`.
@@ -228,7 +228,7 @@ fn assert_keep_alive_during_heavy_isready(tag: &str, threads: Option<usize>) {
     );
     let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let driver = UsiDriver::new(input.as_bytes(), std::sync::Arc::clone(&output))
-        .with_keep_alive_poll(std::time::Duration::from_micros(100));
+        .with_keep_alive_interval(std::time::Duration::from_millis(5));
     driver.run().expect("driver run");
     let out = String::from_utf8(output.lock().expect("output lock").clone()).expect("utf-8");
 
@@ -467,6 +467,44 @@ fn entering_king_try_rule_declares_the_king_move() {
     assert!(
         legal_moves(&p).contains(&parsed),
         "{best} is not a legal move of the try-able position"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn entering_king_rule_in_another_case_applies_the_rule() {
+    // The combo accepts `tryrule` and stores it as given; the rule in effect
+    // must still be TryRule, not a fallback to NoEnteringKing.
+    let dir = TempDir::new("ekr-try-lower");
+    write_synthetic_nn_bin(dir.path());
+    let evaldir = dir.path().to_str().expect("utf-8 temp path");
+
+    let session = format!(
+        "usi\n\
+         setoption name Threads value 1\n\
+         setoption name EvalDir value {evaldir}\n\
+         setoption name EnteringKingRule value tryrule\n\
+         isready\n\
+         position sfen {TRYABLE_SFEN}\n\
+         go depth 1\n\
+         quit\n"
+    );
+    let out = drive(&session);
+
+    let bestmoves = bestmove_lines(&out);
+    assert_eq!(bestmoves.len(), 1, "expected one bestmove in:\n{out}");
+    let best = bestmoves[0]
+        .split_whitespace()
+        .next()
+        .expect("bestmove token");
+    assert_eq!(best, "5b5a", "tryrule must play the king move in:\n{out}");
+    assert!(
+        !out.lines().any(|l| l.starts_with("info depth ")),
+        "the try declaration must not run a search in:\n{out}"
+    );
+    assert!(
+        !out.contains("combo value not found"),
+        "tryrule must be accepted in:\n{out}"
     );
 }
 

@@ -18,21 +18,171 @@ default = ["quick-draw"]
 quick-draw = ["attic-state/quick-draw"]
 # Exactly one network shape must be selected; there is no default. The kernels
 # use the dimensions as array lengths, so the choice is a build-time one.
-sfnn_halfkahm2_1536_15_32_k3k3 = []
-sfnn_halfkahm2_2304_15_64_progress8ek = []
-# YaneuraOu's two standard shapes. One dense stack, no bucketing, and the
-# perspectives concatenated rather than multiplied — see `NetDims::KP256`.
-nnue_kp_256x2_32_32 = []
-nnue_halfkp_256x2_32_32 = []
-# Manaka's own shapes, spelled the way YaneuraOu spells its architectures:
-# feature space, transformer width by two perspectives, then the dense width.
-# `SYM` is the prefix Manaka's `network_type` already uses. Both are order
-# three — the power sums the name has no room for — and both carry `MNW1`
-# files rather than `nn.bin`: f32 weights, and an RMS norm where NNUE clips.
-# They share this crate's feature extraction and nothing else, see
-# `src/manaka.rs`.
-sym_kp_128x2_512 = []
-sym_halfkp_128x2_512 = []
+#
+# SFNN shapes: HalfKA_hm2, the two perspectives multiplied element-wise, nine
+# layer stacks in the file. The name ends with the rule that picks a stack for a
+# position. `k3k3` is the two kings' ranks. `progress8ek` and `progress8kpabs`
+# are game progress cut into eight buckets (the coefficients are in a
+# `progress.bin` beside `nn.bin`), and they differ in one thing: `ek` sends
+# mutual entering kings to the ninth stack, `kpabs` has no such case.
+#
+# The two 1024 shapes read the same file layout and differ in that rule alone. The
+# file does not say which one it was trained for (a net trained with the ninth
+# stack and one trained without carry the same header), so the build does.
+sfnn_halfkahm2_1536_15_32_k3k3 = ["sfnn"]
+sfnn_halfkahm2_1024_15_64_progress8kpabs = ["sfnn_progress"]
+sfnn_halfkahm2_1024_15_64_progress8ek = ["sfnn_progress_ek"]
+sfnn_halfkahm2_2304_15_64_progress8ek = ["sfnn_progress_ek"]
+# Sirius's network, read as it ships: HalfKA_hm2 plus the threat features (the
+# attacks between the pieces on the board), eight layer stacks chosen by an
+# integer game-phase sum and blended across a stack boundary. It has no
+# `progress.bin`, and its output scale is 26. See `src/threat.rs` and `src/gp.rs`.
+sfnn_halfkahm2_threat_1024_15_64_8gp = ["sfnn_threat"]
+# YaneuraOu's standard shapes. One dense stack, no bucketing, and the
+# perspectives concatenated rather than multiplied — see `NetDims::KP256`. The
+# name spells the architecture the way YaneuraOu does: feature set, transformer
+# width by two perspectives, then the two hidden widths.
+nnue_kp_256x2_32_32 = ["nnue_standard", "nnue_kp"]
+nnue_kp_128x2_32_32 = ["nnue_standard", "nnue_kp"]
+nnue_halfkp_256x2_32_32 = ["nnue_standard", "nnue_halfkp"]
+nnue_halfkp_128x2_32_32 = ["nnue_standard", "nnue_halfkp"]
+nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
+# Internal. Each shape turns on the ones that describe it so that the code they
+# share can be gated once instead of listing every shape. None selects a network
+# by itself: the guard in `types.rs` only counts the shapes above.
+#   sfnn                 every SFNN shape
+#   sfnn_progress        ... whose stack is picked by game progress
+#   sfnn_progress_ek     ... and which also sends mutual entering kings to the ninth
+#                        stack (NAGISA V4, and the 1024 net tatara trains with the
+#                        entering-king bucket). Without it the ninth is read and
+#                        never used, because V3 was trained with eight buckets.
+#   sfnn_threat          ... that adds the threat features to the accumulator and picks
+#                        its stack from an integer game-phase sum (Sirius). Not a
+#                        progress shape: no `progress.bin`
+#   nnue_standard        every YaneuraOu standard shape
+#   nnue_kp              ... whose features are K+P
+#   nnue_halfkp          ... whose features are `HalfKP`
+#   sym                  every Manaka shape, which is every `synn_*` one. Like `hce`
+#                        it stands for them in the guard's pairwise lists, so a new
+#                        one widens none of them. The name is the family's old one
+#                        and is kept so that the `cfg`s and the other crates'
+#                        features that name it do not change
+#   sym_kp               ... whose features are K+P
+#   sym_halfkp           ... whose features are Manaka's HalfKP
+#   sym_token            ... whose features are Manaka's own token space (2,344 rows,
+#                        nothing crossed with anything). The only space a pair
+#                        table, a second moment or a square field can exist in
+#   sym_hm               ... read with `hm`: each frame mirrored left to right when its own king stands
+#                        on the sixth to ninth file (`HM` in `src/manaka/shape.rs`); token space only
+#   hce                  every hand-crafted shape. Unlike the others it also
+#                        stands for them in the guard's pairwise lists, because
+#                        an HCE shape is exactly what `hce` being on means.
+# Count how often each layer of a SYNN head sits on its floor or ceiling, and answer the
+# `clipstats` command with it. A measuring build: the counters are atomics added to on every
+# evaluation, and a build without the feature has none of them. See `manaka/clip_stats.rs`.
+clip_stats = []
+# A checking build for the threat shape: every `do_move` rebuilds the accumulator from
+# scratch instead of deriving it from the parent. A search then has to be identical with
+# and without it, which is how the incremental update is checked end to end. Off in every
+# build that is not made to check; it only means something under the threat shape.
+threat_force_refresh = []
+sfnn = []
+sfnn_progress = ["sfnn"]
+sfnn_progress_ek = ["sfnn_progress"]
+sfnn_threat = ["sfnn"]
+nnue_standard = []
+nnue_kp = []
+nnue_halfkp = []
+sym = []
+sym_kp = ["sym"]
+sym_halfkp = ["sym"]
+sym_hm = []
+sym_token = ["sym"]
+hce = []
+# Manaka's own shapes: `SYNN`, SYM's sums behind NNUE's arithmetic. They read the
+# `nn.bin` container, with an architecture string that leads with `Features=` and
+# says `ClipScaled` and `ClippedReLU` where a SYM net says `RmsNormScaled` and `ReLU`:
+# the token embedding and its power sums (and optionally a pair table, a second
+# moment and a square field), then each block scaled by its own gain and clipped to
+# [0, 1], two clipped dense layers, and a linear value. The embedding, the two dense
+# matrices and the three tables are stored as IEEE binary16, the gains, the biases and
+# the value row as f32. They share this crate's feature extraction and nothing else,
+# see `src/manaka/`.
+#
+# The name is spelled the way YaneuraOu spells its architectures: feature space,
+# transformer width by two perspectives, then both hidden widths. A shape that has a
+# pair table, a second moment or a square field is spelled by what follows:
+# `_pair<N>` for the table's width, `_m<N>` for a second moment over `N` channels
+# and `_f<N>` for a square field of `N` channels per square. Order three is
+# the order of every shape and is not spelled.
+#
+# `token` is Manaka's own space and the one the trainer starts from: the other two
+# borrow YaneuraOu's numbering so that the two engines' feature sets agree. It is
+# also the only space with a pair table, a second moment or a square field, for the
+# reason Manaka's shape grammar gives: each wants a row per token or per pair of
+# them, and the other spaces have up to 125,389 of them.
+#
+# A SYNN net has two hidden layers (NNUE's back half has two) and none of the
+# blocks that need a norm to bound them, which Manaka's shape grammar refuses under
+# `--type synn`. These are the eight that are trained:
+#
+#   feature                                Manaka's shape code
+#   synn_token_128x2_32_32                 pair0_d128_o3_h32_h232
+#   synn_token_256x2_32_32                 pair0_d256_o3_h32_h232
+#   synn_kp_128x2_32_32                    kp_pair0_d128_o3_h32_h232
+#   synn_kp_256x2_32_32                    kp_pair0_d256_o3_h32_h232
+#   synn_halfkp_128x2_32_32                halfkp_pair0_d128_o3_h32_h232
+#   synn_token_128x2_32_32_pair16          pair16_d128_o3_h32_h232
+#   synn_token_128x2_32_32_pair16_o1       pair16_d128_o1_h32_h232
+#   synn_token_128x2_32_32_pair16_o1_hm    pair16_d128_o1_h32_h232_hm (the file says FoldedTokens: each frame is read
+#                                          mirrored when its own king is on files 6 to 9)
+#   synn_token_128x2_32_32_pair16_m8_f2    pair16_d128_o3_h32_h232_m8_f2
+#
+# Manaka writes these with `manaka-train export-nnue` from a net trained under
+# `--type synn`; the dimensions of each are one row of `src/manaka/shape.rs`.
+synn_token_128x2_32_32 = ["sym_token"]
+synn_token_256x2_32_32 = ["sym_token"]
+synn_kp_128x2_32_32 = ["sym_kp"]
+synn_kp_256x2_32_32 = ["sym_kp"]
+synn_halfkp_128x2_32_32 = ["sym_halfkp"]
+synn_token_128x2_32_32_pair16 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
+synn_token_128x2_32_32_pair16_m8_f2 = ["sym_token"]
+# The two hand-crafted evaluations (HCE), spelled the same way: how many
+# coefficients, then how they are grouped. Material is 10 board slots and 7
+# hand slots; Mobility is 107 board features and 57 for a piece in hand.
+# Neither reads a file -- the coefficients are a generated source file compiled
+# into the binary -- and neither shares anything with the network shapes: they
+# count pieces and attacks straight off the `Position`, so `features.rs` and
+# everything behind it is left out of the build. See `src/hce.rs`.
+hce_material_17 = ["hce"]
+hce_mobility_107_57 = ["hce"]
+# Which fit of the HCE shape selected above, not a shape of its own. Off is the
+# fit over the teacher as generated; on is the fit over the same teacher moved
+# to its quiescence leaves (`qleap/Training_dataset_qsearched_by_NAGISA_V4`),
+# where a position in the middle of an exchange no longer votes. Same lengths,
+# same extraction, other numbers -- see the two `hce_weights_*_qs.rs` files.
+# It qualifies a shape rather than being one, so the guard in `types.rs` leaves
+# it out of every list: counting it would reject the builds it exists to
+# describe.
+hce_fit_qsearched = []
+
+# Tools for putting a network beside the trainer's own evaluation of it (see
+# `scripts/manaka_compare.py`). Each is built only for the shapes it can read:
+# the networks are tens to hundreds of megabytes and live outside the repository,
+# so these are not tests.
+[[example]]
+name = "sym_dump"
+required-features = ["sym"]
+
+[[example]]
+name = "nnue_dump"
+required-features = ["nnue_standard"]
+
+[[example]]
+name = "clip_dump"
+required-features = ["clip_stats"]
 
 [dev-dependencies]
 proptest = "~1.11"

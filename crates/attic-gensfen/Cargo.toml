@@ -23,8 +23,32 @@ quick-draw = [
 ]
 # On by default here: this binary exists to generate teacher data from NAGISA V4.
 sfnn_halfkahm2_1536_15_32_k3k3 = ["attic-eval/sfnn_halfkahm2_1536_15_32_k3k3", "attic-search/sfnn_halfkahm2_1536_15_32_k3k3"]
+sfnn_halfkahm2_1024_15_64_progress8kpabs = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8kpabs", "attic-search/sfnn_halfkahm2_1024_15_64_progress8kpabs"]
+sfnn_halfkahm2_1024_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8ek", "attic-search/sfnn_halfkahm2_1024_15_64_progress8ek"]
 sfnn_halfkahm2_2304_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_2304_15_64_progress8ek", "attic-search/sfnn_halfkahm2_2304_15_64_progress8ek"]
+sfnn_halfkahm2_threat_1024_15_64_8gp = ["attic-eval/sfnn_halfkahm2_threat_1024_15_64_8gp", "attic-search/sfnn_halfkahm2_threat_1024_15_64_8gp"]
 nnue_kp_256x2_32_32 = ["attic-eval/nnue_kp_256x2_32_32", "attic-search/nnue_kp_256x2_32_32"]
+nnue_kp_128x2_32_32 = ["attic-eval/nnue_kp_128x2_32_32", "attic-search/nnue_kp_128x2_32_32"]
 nnue_halfkp_256x2_32_32 = ["attic-eval/nnue_halfkp_256x2_32_32", "attic-search/nnue_halfkp_256x2_32_32"]
-sym_kp_128x2_512 = ["attic-eval/sym_kp_128x2_512", "attic-search/sym_kp_128x2_512"]
-sym_halfkp_128x2_512 = ["attic-eval/sym_halfkp_128x2_512", "attic-search/sym_halfkp_128x2_512"]
+nnue_halfkp_128x2_32_32 = ["attic-eval/nnue_halfkp_128x2_32_32", "attic-search/nnue_halfkp_128x2_32_32"]
+nnue_halfkp_768x2_16_64 = ["attic-eval/nnue_halfkp_768x2_16_64", "attic-search/nnue_halfkp_768x2_16_64"]
+synn_token_128x2_32_32 = ["attic-eval/synn_token_128x2_32_32", "attic-search/synn_token_128x2_32_32", "sym"]
+synn_kp_128x2_32_32 = ["attic-eval/synn_kp_128x2_32_32", "attic-search/synn_kp_128x2_32_32", "sym"]
+synn_kp_256x2_32_32 = ["attic-eval/synn_kp_256x2_32_32", "attic-search/synn_kp_256x2_32_32", "sym"]
+synn_token_256x2_32_32 = ["attic-eval/synn_token_256x2_32_32", "attic-search/synn_token_256x2_32_32", "sym"]
+synn_halfkp_128x2_32_32 = ["attic-eval/synn_halfkp_128x2_32_32", "attic-search/synn_halfkp_128x2_32_32", "sym"]
+synn_token_128x2_32_32_pair16 = ["attic-eval/synn_token_128x2_32_32_pair16", "attic-search/synn_token_128x2_32_32_pair16", "sym"]
+synn_token_128x2_32_32_pair16_o1 = ["attic-eval/synn_token_128x2_32_32_pair16_o1", "attic-search/synn_token_128x2_32_32_pair16_o1", "sym"]
+synn_token_128x2_32_32_pair16_o1_hm = ["attic-eval/synn_token_128x2_32_32_pair16_o1_hm", "attic-search/synn_token_128x2_32_32_pair16_o1_hm", "sym"]
+synn_token_128x2_32_32_pair16_m8_f2 = ["attic-eval/synn_token_128x2_32_32_pair16_m8_f2", "attic-search/synn_token_128x2_32_32_pair16_m8_f2", "sym"]
+hce_material_17 = ["attic-eval/hce_material_17", "attic-search/hce_material_17", "hce"]
+hce_mobility_107_57 = ["attic-eval/hce_mobility_107_57", "attic-search/hce_mobility_107_57", "hce"]
+# Qualifies one of the two shapes above; it is not a shape of its own.
+hce_fit_qsearched = ["attic-eval/hce_fit_qsearched", "attic-search/hce_fit_qsearched"]
+# Internal: every hand-crafted shape turns it on. A `cfg` cannot see another
+# crate's features, so the tests that need a synthetic network, which an HCE
+# shape does not have, are gated on this crate's own copy.
+hce = []
+# Internal: every Manaka shape turns it on, for the same tests and the same
+# reason: a `synn_*` network exists only as a trained file.
+sym = []

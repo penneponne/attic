@@ -7,10 +7,9 @@
 //! The network file is staged locally and never committed, so when it is absent
 //! the test prints a notice and passes.
 
-#![cfg(any(
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3",
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
-))]
+// The threat shape clamps its score, which this test's `raw / 24` does not allow for;
+// `sirius_fv_scale.rs` is its counterpart.
+#![cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 
 use std::path::PathBuf;
 
