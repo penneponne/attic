@@ -10,9 +10,11 @@
 //!
 //! Both backends stay **compiled unconditionally**, only the call sites being
 //! `cfg`-gated, so that the SIMD-equals-scalar tests in each backend module keep
-//! exercising both. Those tests, and only those, probe the CPU at run time, so
-//! that they skip gracefully on a host without the features. Whichever backend
-//! a build selects, the evaluation output is bit-identical.
+//! exercising both. Those tests probe the CPU at run time, so that they skip
+//! gracefully on a host without the features. The only other run-time probe is
+//! a test compiled solely into a `-C target-cpu=native` build, the one build
+//! shape in which the host's features are the build's. Whichever backend a
+//! build selects, the evaluation output is bit-identical.
 //!
 //! ## Safety invariants
 //!
@@ -39,19 +41,18 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_post_ft;
 
-// Every SFNN shape. The feature transformer and the element-wise kernels take
-// any width that is whole 512-bit registers, which all three are; the dense
-// chains are shape-specific: `avx512_post_ft::fused_fc_chain` for the 1536,
-// whose fc_2 reads 32 bytes, and `avx512_packed_tail` for the 64-wide 1024s and
-// 2304, the reference's `kUsePackedTail` (`AVX512 && kHidden2Dims == 64`).
+// The feature transformer and element-wise kernels support whole 512-bit
+// registers. The dense chains use avx512_post_ft for the 1536 shape and
+// avx512_packed_tail for the progress-based 1024 and 2304 shapes.
+// Sirius's threat shape still selects the AVX2 kernels.
 #[allow(dead_code)]
-#[cfg(all(target_arch = "x86_64", feature = "sfnn"))]
+#[cfg(all(target_arch = "x86_64", feature = "sfnn", not(feature = "sfnn_threat")))]
 pub mod avx512;
 #[allow(dead_code)]
 #[cfg(all(target_arch = "x86_64", feature = "sfnn_progress"))]
 pub mod avx512_packed_tail;
 #[allow(dead_code)]
-#[cfg(all(target_arch = "x86_64", feature = "sfnn"))]
+#[cfg(all(target_arch = "x86_64", feature = "sfnn", not(feature = "sfnn_threat")))]
 pub mod avx512_post_ft;
 // Index arithmetic only, so on every target: the network builds its group-major
 // copies from it, and its tests run where AVX-512 does not.
@@ -74,15 +75,16 @@ pub enum Backend {
 /// not. The eval-parity test reads this to catch a build that silently compiled
 /// scalar on a VNNI-capable host.
 ///
-/// The SFNN shapes report [`Backend::Avx512Vnni`] on such a build: each has an
-/// AVX-512 VNNI dense chain. The standard YaneuraOu shapes have none and run the
-/// AVX2 or scalar kernels on the same target features, and say so.
+/// The 1536 and progress-based SFNN shapes report [`Backend::Avx512Vnni`] on
+/// such a build. The threat shape uses AVX2, as do the ordinary NNUE shapes
+/// when AVX2 is enabled.
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
     target_feature = "avx512vnni",
-    feature = "sfnn"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub const fn active_backend() -> Backend {
     Backend::Avx512Vnni
@@ -94,7 +96,8 @@ pub const fn active_backend() -> Backend {
     target_feature = "avx512f",
     target_feature = "avx512bw",
     target_feature = "avx512vnni",
-    feature = "sfnn"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 )))]
 pub const fn active_backend() -> Backend {
     Backend::Scalar
@@ -108,7 +111,8 @@ pub const fn active_backend() -> Backend {
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    feature = "sfnn"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub mod transformer_kernel {
     use super::avx512;
@@ -181,7 +185,8 @@ pub mod transformer_kernel {
     not(all(
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        feature = "sfnn"
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
     ))
 ))]
 pub mod transformer_kernel {
@@ -243,6 +248,15 @@ pub mod transformer_kernel {
         // SAFETY: see `add_features`.
         unsafe { avx2::derive_features(dst, src, weights, added, removed) }
     }
+
+    /// Take the `removed` threat rows off `out` and put the `added` ones on (the threat
+    /// shape's int8 rows, widened and added unscaled).
+    #[cfg(feature = "sfnn_threat")]
+    #[inline]
+    pub fn apply_threat_rows(out: &mut [i16], weights: &[i8], removed: &[u32], added: &[u32]) {
+        // SAFETY: see `add_features`.
+        unsafe { avx2::apply_threat_rows(out, weights, removed, added) }
+    }
 }
 
 /// The portable arm: neither AVX-512 nor AVX2.
@@ -254,6 +268,8 @@ pub mod transformer_kernel {
     )
 )))]
 pub mod transformer_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::scalar::apply_threat_rows;
     pub use super::scalar::{
         add_features, add_sub_features, add_sub_sub_features, derive_features, sub_features,
     };
@@ -265,7 +281,8 @@ pub mod transformer_kernel {
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    feature = "sfnn"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub mod post_ft_kernel {
     use super::{avx512_post_ft, scalar_post_ft};
@@ -361,7 +378,8 @@ pub mod post_ft_kernel {
     not(all(
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        feature = "sfnn"
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
     ))
 ))]
 pub mod post_ft_kernel {
@@ -438,6 +456,15 @@ pub mod post_ft_kernel {
         unsafe { super::avx2_post_ft::ewm_one_perspective(half, out) }
     }
 
+    /// Pairwise element-wise multiply for one perspective of the threat shape, whose
+    /// accumulator is at the scale the file holds: clamp to 127, multiply, shift by 7.
+    #[cfg(feature = "sfnn_threat")]
+    #[inline]
+    pub fn ewm_one_perspective_file_scale(half: &[i16], out: &mut [u8]) {
+        // SAFETY: see `ewm_one_perspective`.
+        unsafe { super::avx2_post_ft::ewm_one_perspective_file_scale(half, out) }
+    }
+
     /// Clipped ReLU.
     #[inline]
     pub fn clipped_relu(input: &[i32], output: &mut [u8]) {
@@ -455,6 +482,8 @@ pub mod post_ft_kernel {
     )
 )))]
 pub mod post_ft_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::scalar_post_ft::ewm_one_perspective_file_scale;
     pub use super::scalar_post_ft::{
         affine, affine_u7, affine_u7_wide, clipped_relu, ewm_one_perspective, sqr_clipped_relu,
     };
@@ -465,41 +494,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_backend_is_avx512_when_cpu_supports_vnni() {
-        // Backend selection is compile-time, so this checks the *build* was
-        // configured for its host: under `-C target-cpu=native` a VNNI-capable
-        // CPU must yield the SIMD backend, and a scalar one here means the build
-        // did not enable the host's features.
-        //
-        // CI is the one place that is not built for its host: it pins
-        // `-C target-cpu=x86-64-v3` so cached artefacts run on any runner, and
-        // sets `ATTIC_BASELINE_BUILD` to say so. A runner whose CPU happens to
-        // have AVX-512 VNNI must then still get the scalar backend, which is
-        // what this asserts in that case.
-        #[cfg(target_arch = "x86_64")]
-        {
-            let has_vnni = std::arch::is_x86_feature_detected!("avx512f")
-                && std::arch::is_x86_feature_detected!("avx512bw")
-                && std::arch::is_x86_feature_detected!("avx512vnni");
-            if std::env::var_os("ATTIC_BASELINE_BUILD").is_some() {
-                assert_eq!(
-                    active_backend(),
-                    Backend::Scalar,
-                    "ATTIC_BASELINE_BUILD is set, so the build should not have \
-                     enabled AVX-512 VNNI",
-                );
-            } else if has_vnni {
-                assert_eq!(
-                    active_backend(),
-                    Backend::Avx512Vnni,
-                    "CPU reports AVX-512 VNNI but this build compiled the scalar \
-                     backend — check that `-C target-cpu=native` is in effect",
-                );
-            } else {
-                assert_eq!(active_backend(), Backend::Scalar);
-            }
+    fn active_backend_follows_compile_time_target_features() {
+        // The SFNN shapes with VNNI kernels report the SIMD backend.
+        let simd_build = cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni",
+            feature = "sfnn",
+            not(feature = "sfnn_threat")
+        ));
+        let expected = if simd_build {
+            Backend::Avx512Vnni
+        } else {
+            Backend::Scalar
+        };
+        assert_eq!(active_backend(), expected);
+    }
+
+    // Only a `-C target-cpu=native` build promises the host's features; under a
+    // fixed baseline (CI pins `x86-64-v3`) the scalar backend is correct on any
+    // CPU, a runner that happens to have AVX-512 VNNI included. The shapes with
+    // the AVX-512 kernels must pick them up.
+    #[cfg(all(
+        target_cpu_native,
+        target_arch = "x86_64",
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
+    ))]
+    #[test]
+    fn native_build_on_a_vnni_host_is_the_simd_build() {
+        let has_vnni = std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vnni");
+        if has_vnni {
+            assert_eq!(
+                active_backend(),
+                Backend::Avx512Vnni,
+                "a `-C target-cpu=native` build on an AVX-512 VNNI host compiled \
+                 the scalar backend",
+            );
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        assert_eq!(active_backend(), Backend::Scalar);
     }
 }

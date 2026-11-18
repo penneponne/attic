@@ -58,12 +58,18 @@ pub struct RootMove {
     pub mean_squared_score: i64,
     /// `selDepth` recorded when this move became the PV.
     pub sel_depth: i32,
-    /// `uciScore` is a lower bound (fail high).
-    pub score_lowerbound: bool,
-    /// `uciScore` is an upper bound (fail low).
-    pub score_upperbound: bool,
+    /// The score is only a lower bound (a fail high, or a loss from an aborted
+    /// search that is not trusted).
+    pub inexact_lower: bool,
+    /// The score is only an upper bound (a fail low, or a loss capped at an
+    /// earlier line's when a MultiPV line was aborted).
+    pub inexact_upper: bool,
     /// Nodes spent searching this root move's subtree.
     pub effort: u64,
+    /// The previous iteration's `pv`, kept with [`Self::previous_score`].
+    pub previous_pv: Vec<Move>,
+    /// Whether [`Self::previous_score`] was an exact score of a searched line.
+    pub previous_score_exact: bool,
 }
 
 impl RootMove {
@@ -78,10 +84,29 @@ impl RootMove {
             average_score: -VALUE_INFINITE,
             mean_squared_score: MEAN_SQUARED_INIT,
             sel_depth: 0,
-            score_lowerbound: false,
-            score_upperbound: false,
+            inexact_lower: false,
+            inexact_upper: false,
             effort: 0,
+            previous_pv: Vec::new(),
+            previous_score_exact: false,
         }
+    }
+
+    /// The score is a bound rather than an exact value.
+    pub fn is_inexact(&self) -> bool {
+        self.inexact_lower || self.inexact_upper
+    }
+
+    /// The score is a proven loss that an exact search established, so it may
+    /// be trusted as one.
+    pub fn is_exact_loss(&self) -> bool {
+        self.score != -VALUE_INFINITE && is_loss(self.score) && !self.is_inexact()
+    }
+
+    /// Mark the score exact.
+    pub fn unset_inexact(&mut self) {
+        self.inexact_lower = false;
+        self.inexact_upper = false;
     }
 }
 
@@ -130,72 +155,58 @@ pub struct WorkerVote {
     pub score: Value,
     /// `rootMoves[0].pv[0]` — the move this worker would play.
     pub pv0: Move,
-    /// `rootMoves[0].pv.size()` — read by the truncated-PV tiebreak.
+    /// `rootMoves[0].pv.size()` — breaks a tie between equal vote totals.
     pub pv_len: usize,
-    /// `completedDepth` — the last fully-completed iterative-deepening depth.
-    pub completed_depth: i32,
+    /// `rootMoves[0].is_inexact()` — a bound is never taken as a proven result.
+    pub inexact: bool,
 }
 
 /// `get_best_thread`: the index of the worker whose result the engine reports.
 /// `workers[0]` must be the main worker, and the slice is never empty.
 ///
-/// Each worker's `pv[0]` is voted by `(score - minScore + 14) * completedDepth`;
-/// then a proven-win incumbent only yields to a shorter mate, a proven-loss one
-/// only to a longer defence, and otherwise the challenger wins on a proven
-/// decisive score or a higher vote total.
+/// Each worker's `pv[0]` is voted by `score - minScore + 14`. A decisive
+/// incumbent only yields to a decisive challenger of the same sign with a
+/// larger `|score|`; otherwise the challenger wins on a decisive score, a
+/// higher vote total, or an equal total and a longer PV. An inexact score is
+/// never decisive.
 pub fn select_best_worker(workers: &[WorkerVote]) -> usize {
     debug_assert!(!workers.is_empty());
 
-    // Seeded from `VALUE_NONE` as the reference does, though every worker has a
-    // valid score so the seed is always superseded.
-    let min_score = workers.iter().map(|w| w.score).min().unwrap_or(0);
+    let min_score = workers
+        .iter()
+        .map(|w| w.score)
+        .fold(VALUE_INFINITE, Value::min);
 
-    // Widened to `i64`, so that the product cannot overflow.
-    let voting_value = |w: &WorkerVote| -> i64 {
-        (w.score as i64 - min_score as i64 + 14) * w.completed_depth as i64
-    };
-
-    // `votes[pv[0]] += voting_value(w)` summed over workers.
     let mut votes: std::collections::HashMap<Move, i64> = std::collections::HashMap::new();
     for w in workers {
-        *votes.entry(w.pv0).or_insert(0) += voting_value(w);
+        *votes.entry(w.pv0).or_insert(0) += w.score as i64 - min_score as i64 + 14;
     }
+
+    // An aborted depth-1 search may leave a decisive score that is only a bound.
+    let decisive = |w: &WorkerVote| {
+        w.score != -VALUE_INFINITE && (is_win(w.score) || is_loss(w.score)) && !w.inexact
+    };
 
     // `best` starts at the main worker, so its first comparison is a no-op.
     let mut best = 0usize;
-    for i in 0..workers.len() {
+    for (i, th) in workers.iter().enumerate() {
         let cur = &workers[best];
-        let th = &workers[i];
-
-        let best_score = cur.score;
-        let new_score = th.score;
-
         let best_vote = votes[&cur.pv0];
         let new_vote = votes[&th.pv0];
 
-        let best_in_win = is_win(best_score);
-        let new_in_win = is_win(new_score);
-        let best_in_loss = best_score != -VALUE_INFINITE && is_loss(best_score);
-        let new_in_loss = new_score != -VALUE_INFINITE && is_loss(new_score);
-
-        // A vote total only counts when the PV has more than two moves.
-        let better_voting_value =
-            voting_value(th) * (th.pv_len > 2) as i64 > voting_value(cur) * (cur.pv_len > 2) as i64;
-
-        if best_in_win {
-            // Keep the shortest mate: switch only to a higher proven-win score.
-            if new_score > best_score {
+        if decisive(cur) {
+            // A larger `|score|` is the shorter mate for a win and, as the
+            // reference reads it, the quicker loss for a loss. A challenger of
+            // the other sign never displaces the incumbent.
+            if decisive(th)
+                && th.score.abs() > cur.score.abs()
+                && is_win(th.score) == is_win(cur.score)
+            {
                 best = i;
             }
-        } else if best_in_loss {
-            // Keep the longest defence: switch only to a lower proven loss.
-            if new_in_loss && new_score < best_score {
-                best = i;
-            }
-        } else if new_in_win
-            || new_in_loss
-            || (!is_loss(new_score)
-                && (new_vote > best_vote || (new_vote == best_vote && better_voting_value)))
+        } else if decisive(th)
+            || (!is_loss(th.score)
+                && (new_vote > best_vote || (new_vote == best_vote && th.pv_len > cur.pv_len)))
         {
             best = i;
         }
@@ -264,18 +275,30 @@ impl EnteringKingRule {
         "TryRule",
     ];
 
-    /// Map an option string to its rule. An unrecognised string falls back to
-    /// [`EnteringKingRule::None`], as the reference's post-assert return does.
+    /// Map an option string to its rule, ignoring ASCII case.
+    ///
+    /// The combo option accepts a choice in any case and stores it as given, so
+    /// `tryrule` must select [`EnteringKingRule::Try`]. The reference maps the
+    /// stored text case-sensitively and crashes on such a value; this port
+    /// applies the rule instead.
+    ///
+    /// The option never stores a string outside [`Self::STRINGS`], so only a
+    /// direct caller passing some other string reaches the fallback to
+    /// [`EnteringKingRule::None`].
     pub fn from_option(s: &str) -> Self {
-        match s {
-            "NoEnteringKing" => Self::None,
-            "CSARule24" => Self::Point24,
-            "CSARule24H" => Self::Point24H,
-            "CSARule27" => Self::Point27,
-            "CSARule27H" => Self::Point27H,
-            "TryRule" => Self::Try,
-            _ => Self::None,
-        }
+        const RULES: [EnteringKingRule; 6] = [
+            EnteringKingRule::None,
+            EnteringKingRule::Point24,
+            EnteringKingRule::Point24H,
+            EnteringKingRule::Point27,
+            EnteringKingRule::Point27H,
+            EnteringKingRule::Try,
+        ];
+        Self::STRINGS
+            .iter()
+            .zip(RULES)
+            .find(|(name, _)| name.eq_ignore_ascii_case(s))
+            .map_or(Self::None, |(_, rule)| rule)
     }
 }
 
@@ -760,6 +783,28 @@ mod tests {
     }
 
     #[test]
+    fn from_option_maps_every_choice_in_any_case() {
+        let cases = [
+            ("noenteringking", EnteringKingRule::None),
+            ("csarule24", EnteringKingRule::Point24),
+            ("CSARULE24H", EnteringKingRule::Point24H),
+            ("csaRule27", EnteringKingRule::Point27),
+            ("csarule27h", EnteringKingRule::Point27H),
+            ("tryrule", EnteringKingRule::Try),
+        ];
+        for (text, rule) in cases {
+            assert_eq!(EnteringKingRule::from_option(text), rule, "{text}");
+        }
+        for (text, rule) in EnteringKingRule::STRINGS.iter().zip(cases.map(|c| c.1)) {
+            assert_eq!(EnteringKingRule::from_option(text), rule, "{text}");
+        }
+        assert_eq!(
+            EnteringKingRule::from_option("Nope"),
+            EnteringKingRule::None
+        );
+    }
+
+    #[test]
     fn no_entering_king_never_declares() {
         // A clearly declarable 27-point position yields nothing under `None`.
         let p = pos(NYUGYOKU);
@@ -862,70 +907,166 @@ mod tests {
         (rm[0].mv, rm[1].mv)
     }
 
-    fn vote(score: Value, pv0: Move, pv_len: usize, completed_depth: i32) -> WorkerVote {
+    /// Three distinct legal moves from startpos, used as the workers' `pv[0]`.
+    fn three_moves() -> (Move, Move, Move) {
+        let rm = generate_root_moves(&pos(STARTPOS), false);
+        (rm[0].mv, rm[1].mv, rm[2].mv)
+    }
+
+    fn vote(score: Value, pv0: Move, pv_len: usize) -> WorkerVote {
         WorkerVote {
             score,
             pv0,
             pv_len,
-            completed_depth,
+            inexact: false,
         }
+    }
+
+    fn inexact(mut w: WorkerVote) -> WorkerVote {
+        w.inexact = true;
+        w
+    }
+
+    fn mate_in(ply: Value) -> Value {
+        VALUE_MATE - ply
+    }
+
+    fn mated_in(ply: Value) -> Value {
+        -VALUE_MATE + ply
     }
 
     #[test]
     fn vote_single_worker_degenerates_to_main() {
         let (a, _) = two_moves();
-        assert_eq!(select_best_worker(&[vote(100, a, 1, 5)]), 0);
+        assert_eq!(select_best_worker(&[vote(100, a, 1)]), 0);
+        assert_eq!(select_best_worker(&[vote(mated_in(3), a, 1)]), 0);
     }
 
     #[test]
-    fn vote_plain_winner_is_the_higher_vote_total() {
-        let (a, b) = two_moves();
-        // Equal scores; worker 1 searched deeper, so its move's vote total is
-        // higher: votes[a] = 14*5 = 70, votes[b] = 14*10 = 140.
-        let workers = [vote(100, a, 3, 5), vote(100, b, 3, 10)];
+    fn vote_weight_is_score_above_the_minimum_plus_fourteen() {
+        let (a, b, c) = three_moves();
+        // votes[a] = (100 - 0 + 14) = 114; votes[b] = 2 * (50 - 0 + 14) = 128;
+        // votes[c] = 14. Two workers agreeing on `b` outvote the single higher
+        // score on `a`.
+        let workers = [
+            vote(100, a, 3),
+            vote(50, b, 3),
+            vote(50, b, 3),
+            vote(0, c, 3),
+        ];
         assert_eq!(select_best_worker(&workers), 1);
-        // Reversed depths ⇒ the main worker (index 0) keeps the higher total.
-        let workers = [vote(100, a, 3, 10), vote(100, b, 3, 5)];
+        // votes[a] = 130 - 0 + 14 = 144 > 128.
+        let workers = [
+            vote(130, a, 3),
+            vote(50, b, 3),
+            vote(50, b, 3),
+            vote(0, c, 3),
+        ];
+        assert_eq!(select_best_worker(&workers), 0);
+        // votes[a] = 128 = votes[b]: an equal total and an equal PV length keep
+        // the incumbent; no depth enters the weight.
+        let workers = [
+            vote(114, a, 3),
+            vote(50, b, 3),
+            vote(50, b, 3),
+            vote(0, c, 3),
+        ];
         assert_eq!(select_best_worker(&workers), 0);
     }
 
     #[test]
-    fn vote_proven_win_prefers_the_shorter_mate() {
+    fn vote_never_switches_to_a_bounded_loss_on_votes() {
         let (a, b) = two_moves();
-        // Incumbent (index 0) is a proven win (mate in 5); a higher proven-win
-        // score (mate in 3) is a shorter mate and wins.
-        let mate_in = |ply: Value| VALUE_MATE - ply;
-        let workers = [vote(mate_in(5), a, 1, 8), vote(mate_in(3), b, 1, 8)];
+        // votes[b] = 2 * (11 + 14) = 50 > votes[a] = 14, but an inexact loss
+        // is no decisive score and a loss never wins on votes.
+        let workers = [
+            inexact(vote(mated_in(9), a, 3)),
+            inexact(vote(mated_in(20), b, 3)),
+            inexact(vote(mated_in(20), b, 3)),
+        ];
+        assert_eq!(select_best_worker(&workers), 0);
+        // The same loss searched exactly is decisive and takes over.
+        let workers = [
+            inexact(vote(mated_in(9), a, 3)),
+            inexact(vote(mated_in(20), b, 3)),
+            vote(mated_in(20), b, 3),
+        ];
+        assert_eq!(select_best_worker(&workers), 2);
+    }
+
+    /// votes[a] = 2 * (31000 + 31000 + 14) = 124028 against votes[b] =
+    /// mate_in(5) + 31000 + 14 = 63009, with `c` only setting the minimum.
+    fn outvoted_mate(b_inexact: bool) -> usize {
+        let (a, b, c) = three_moves();
+        let mate = vote(mate_in(5), b, 3);
+        let mate = if b_inexact { inexact(mate) } else { mate };
+        select_best_worker(&[
+            vote(31_000, a, 3),
+            vote(31_000, a, 3),
+            vote(-31_000, c, 3),
+            mate,
+        ])
+    }
+
+    #[test]
+    fn vote_decisive_exact_score_beats_a_higher_vote() {
+        assert_eq!(outvoted_mate(false), 3);
+        let (a, b) = two_moves();
+        let workers = [vote(100, a, 3), vote(100, a, 3), vote(mated_in(5), b, 3)];
+        assert_eq!(select_best_worker(&workers), 2);
+    }
+
+    #[test]
+    fn vote_inexact_decisive_score_does_not_beat_a_higher_vote() {
+        assert_eq!(outvoted_mate(true), 0);
+        let (a, b) = two_moves();
+        let workers = [
+            vote(100, a, 3),
+            vote(100, a, 3),
+            inexact(vote(mated_in(5), b, 3)),
+        ];
+        assert_eq!(select_best_worker(&workers), 0);
+        // An inexact win incumbent is not decisive, so a proven one displaces it.
+        let workers = [inexact(vote(mate_in(5), a, 3)), vote(mate_in(9), b, 3)];
         assert_eq!(select_best_worker(&workers), 1);
-        // A *longer* mate (lower proven-win score) never displaces the incumbent.
-        let workers = [vote(mate_in(5), a, 1, 8), vote(mate_in(7), b, 1, 8)];
+        // A proven-win incumbent ignores an inexact shorter mate.
+        let workers = [vote(mate_in(5), a, 1), inexact(vote(mate_in(3), b, 1))];
         assert_eq!(select_best_worker(&workers), 0);
     }
 
     #[test]
-    fn vote_proven_loss_prefers_the_lower_score() {
+    fn vote_decisive_incumbent_yields_to_a_larger_magnitude_of_its_own_sign() {
         let (a, b) = two_moves();
-        // Incumbent (index 0) is a proven loss; a *lower* proven-loss score wins
-        // (— `newThreadScore < bestThreadScore`).
-        let mated_in = |ply: Value| -VALUE_MATE + ply;
-        let workers = [vote(mated_in(7), a, 1, 8), vote(mated_in(3), b, 1, 8)];
+        // A shorter mate (larger `|score|`) wins; a longer one does not.
+        let workers = [vote(mate_in(5), a, 1), vote(mate_in(3), b, 1)];
         assert_eq!(select_best_worker(&workers), 1);
-        // A higher proven-loss score does not displace the incumbent.
-        let workers = [vote(mated_in(3), a, 1, 8), vote(mated_in(7), b, 1, 8)];
+        let workers = [vote(mate_in(5), a, 1), vote(mate_in(7), b, 1)];
+        assert_eq!(select_best_worker(&workers), 0);
+        // For proven losses the larger `|score|` is the quicker one.
+        let workers = [vote(mated_in(7), a, 1), vote(mated_in(3), b, 1)];
+        assert_eq!(select_best_worker(&workers), 1);
+        let workers = [vote(mated_in(3), a, 1), vote(mated_in(7), b, 1)];
+        assert_eq!(select_best_worker(&workers), 0);
+        // A decisive score of the other sign never displaces the incumbent.
+        let workers = [vote(mated_in(7), a, 1), vote(mate_in(3), b, 1)];
+        assert_eq!(select_best_worker(&workers), 0);
+        let workers = [vote(mate_in(7), a, 1), vote(mated_in(3), b, 1)];
         assert_eq!(select_best_worker(&workers), 0);
     }
 
     #[test]
-    fn vote_truncated_pv_breaks_a_vote_tie() {
+    fn vote_tie_goes_to_the_longer_pv() {
         let (a, b) = two_moves();
-        // Equal scores and equal depths ⇒ equal vote totals for the two moves.
-        // The tie is broken by the truncated-PV guard: the worker whose PV has
-        // more than two moves wins.
-        let workers = [vote(50, a, 2, 5), vote(50, b, 3, 5)];
+        let workers = [vote(50, a, 2), vote(50, b, 3)];
         assert_eq!(select_best_worker(&workers), 1);
-        // If the incumbent has the longer PV instead, the tie leaves it in place
-        // (the challenger's `pv.len() > 2` factor is 0, so it cannot exceed).
-        let workers = [vote(50, a, 3, 5), vote(50, b, 2, 5)];
+        let workers = [vote(50, a, 3), vote(50, b, 2)];
         assert_eq!(select_best_worker(&workers), 0);
+        // Any length difference counts, not only a PV past two moves.
+        let workers = [vote(50, a, 5), vote(50, b, 6)];
+        assert_eq!(select_best_worker(&workers), 1);
+        // Workers on the same move share the total; the longer PV among them is
+        // reported.
+        let workers = [vote(50, a, 4), vote(50, a, 7)];
+        assert_eq!(select_best_worker(&workers), 1);
     }
 }

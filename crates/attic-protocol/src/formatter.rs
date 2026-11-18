@@ -73,8 +73,8 @@ impl<'w, W: Write + ?Sized> Formatter<'w, W> {
         self.line(format_args!("bestmove {move_str}"))
     }
 
-    /// Emit a verbatim line with no USI keyword prefix — only the
-    /// option-override diagnostics the reference prints to raw `std::cout`.
+    /// Emit a verbatim line with no USI keyword prefix — only the option
+    /// diagnostics the reference prints to raw `std::cout`.
     pub fn raw_line(&mut self, text: &str) -> io::Result<()> {
         self.line(format_args!("{text}"))
     }
@@ -104,8 +104,8 @@ mod tests {
 
     #[test]
     fn id_name_emits_one_line() {
-        let s = captured(|f| f.id_name("Attic 9.80git").unwrap());
-        assert_eq!(s, "id name Attic 9.80git\n");
+        let s = captured(|f| f.id_name("Attic 9.96git").unwrap());
+        assert_eq!(s, "id name Attic 9.96git\n");
     }
 
     #[test]

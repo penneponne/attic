@@ -53,6 +53,14 @@ pub fn layer_stack_index(pos: &Position) -> usize {
     crate::progress::bucket_index(pos)
 }
 
+/// Sirius's shape picks its stack by the integer game-phase sum and the king code, see
+/// [`crate::gp`]. This is the stack the position itself falls in; a position near a boundary
+/// is also mixed with its neighbour, which [`evaluate_with`] does.
+#[cfg(feature = "sfnn_threat")]
+pub fn layer_stack_index(pos: &Position) -> usize {
+    crate::gp::choose(pos).stack
+}
+
 /// The standard shapes carry one stack and choose nothing.
 ///
 /// `kLayerStacks` is 1 for `NNUE_kp_256x2_32_32` and its HalfKP twin, so the
@@ -115,6 +123,7 @@ pub fn evaluate(net: &NnueNetwork, pos: &Position) -> i32 {
 ///
 /// # Panics
 /// Panics if `pos` is missing either king (via bucket selection).
+#[cfg(not(feature = "sfnn_threat"))]
 pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i32 {
     let bucket = layer_stack_index(pos);
     debug_assert!(bucket < net.stacks.len());
@@ -126,6 +135,33 @@ pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i3
     // The single FV_SCALE consumption site.
     score / fv_scale()
 }
+
+/// Sirius's evaluation from a current accumulator: the stack its game phase falls in, mixed
+/// with the neighbouring one within a blend zone, divided by [`fv_scale`] and clamped to
+/// `+-31753` (the range Sirius keeps its scores in).
+///
+/// # Panics
+/// Panics if `pos` is missing either king (via the stack choice).
+#[cfg(feature = "sfnn_threat")]
+pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i32 {
+    let choice = crate::gp::choose(pos);
+    debug_assert!(choice.stack < net.stacks.len());
+
+    let mut transformed = [0u8; FT_OUTPUT_DIMS];
+    acc.output_transform(pos.side_to_move(), &mut transformed);
+
+    let mut raw = per_layer_flow(&transformed, &net.stacks[choice.stack]);
+    if let Some((other, weight)) = choice.blend {
+        let raw_other = per_layer_flow(&transformed, &net.stacks[other]);
+        raw = crate::gp::blend(raw, raw_other, weight);
+    }
+    // The single FV_SCALE consumption site.
+    (raw / fv_scale()).clamp(-SCORE_LIMIT, SCORE_LIMIT)
+}
+
+/// The largest score magnitude Sirius lets the network produce.
+#[cfg(feature = "sfnn_threat")]
+pub const SCORE_LIMIT: i32 = 31_753;
 
 /// Layer-stack forward pass over the transformed byte buffer, returning the raw
 /// network output before [`fv_scale`].
@@ -480,10 +516,15 @@ mod tests {
         transformed[0] = 39;
 
         assert_eq!(per_layer_flow(&transformed, stack), 1_256);
-        // Whole-pipeline division by the default FV_SCALE: 1_256 / 16 = 78.
+        // Whole-pipeline division by the default FV_SCALE: 1_256 / 16 = 78 (1_256 / 26 = 48 for
+        // the threat shape, whose default is Sirius's).
         assert_eq!(
             per_layer_flow(&transformed, stack) / crate::scale::FV_SCALE_DEFAULT,
-            78
+            if cfg!(feature = "sfnn_threat") {
+                48
+            } else {
+                78
+            }
         );
     }
 
