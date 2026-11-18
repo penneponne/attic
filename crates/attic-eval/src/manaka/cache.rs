@@ -130,8 +130,8 @@ impl TokenList {
 }
 
 impl FinnyCache {
-    pub fn new() -> Box<Self> {
-        Box::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

@@ -31,6 +31,16 @@ fn workspace_relative(rel: &str) -> PathBuf {
         .join(rel)
 }
 
+/// The threat shape reads Sirius's file, which lives with the reference material
+/// (`ATTIC_SIRIUS_REF`, see `sirius_parity.rs`) and not under `eval/`.
+#[cfg(feature = "sfnn_threat")]
+fn nn_bin_path() -> PathBuf {
+    std::env::var_os("ATTIC_SIRIUS_REF")
+        .map(|dir| PathBuf::from(dir).join("eval/nn.bin"))
+        .unwrap_or_else(|| workspace_relative("eval/nn.bin"))
+}
+
+#[cfg(not(feature = "sfnn_threat"))]
 fn nn_bin_path() -> PathBuf {
     workspace_relative("eval/nn.bin")
 }

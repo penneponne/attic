@@ -7,7 +7,7 @@
 //! first-search move ordering is a pure function of them and the static terms —
 //! which is what makes the depth-1 node counts reproducible.
 //!
-//! `pawnHistory` and `correctionHistory` do not live here: they are shared
+//! `pawnHistory`, `correctionHistory` and `continuationHistory` are shared
 //! between the worker threads of one NUMA node, so they sit in
 //! [`SharedHistories`] with atomic entries. At a thread count of 1 that type is
 //! byte-identical to a per-worker copy, so single-thread node counts are
@@ -179,7 +179,7 @@ impl CapturePieceToHistory {
         Self::default()
     }
 
-    /// Overwrite every entry with `v`; the reference's init is `-678`.
+    /// Overwrite every entry with `v`; the reference's init is `-742`.
     pub fn fill(&mut self, v: i16) {
         self.table.iter_mut().for_each(|e| *e = v);
     }
@@ -244,6 +244,13 @@ impl ButterflyHistory {
         &self.table
     }
 
+    /// Scale every entry by `num / den`, truncating toward zero.
+    pub fn scale(&mut self, num: i32, den: i32) {
+        self.table
+            .iter_mut()
+            .for_each(|e| *e = (*e as i32 * num / den) as i16);
+    }
+
     fn index(us: Color, m: Move) -> usize {
         us.index() * (1 << 16) + (m.to_bits() & 0xFFFF) as usize
     }
@@ -289,14 +296,9 @@ impl PieceToHistory {
         Self::default()
     }
 
-    /// Overwrite every entry with `v`; the reference's init is `-523`.
+    /// Overwrite every entry with `v`; the reference's init is `-586`.
     pub fn fill(&mut self, v: i16) {
         self.table.iter_mut().for_each(|e| *e = v);
-    }
-
-    /// Overwrite this plane's entries from `src`, a `PIECE_NB * SQ_NB` slice.
-    fn copy_from_slice(&mut self, src: &[i16]) {
-        self.table.copy_from_slice(src);
     }
 
     fn index(pc: Piece, to: Square) -> usize {
@@ -336,7 +338,7 @@ impl LowPlyHistory {
         Self::default()
     }
 
-    /// Overwrite every entry with `v`; the reference's init is `98`.
+    /// Overwrite every entry with `v`; the reference's init is `102`.
     pub fn fill(&mut self, v: i16) {
         self.table.iter_mut().for_each(|e| *e = v);
     }
@@ -395,10 +397,11 @@ impl CorrChannel {
     }
 }
 
-/// Reference `SharedHistories::clear()` init values: correction entries `0`,
-/// pawn entries `-1238`.
-const CORRECTION_INIT: i16 = 0;
-const PAWN_INIT: i16 = -1238;
+/// Reference `clear()` init values of the shared tables: correction entries
+/// `-5`, pawn entries `-1338`, continuation entries `-586`.
+const CORRECTION_INIT: i16 = -5;
+const PAWN_INIT: i16 = -1338;
+const CONTINUATION_INIT: i16 = -586;
 
 /// [`apply_gravity`] on an atomic entry: a plain relaxed load-modify-store
 /// rather than a CAS loop, because the reference leaves its read-modify-write
@@ -420,10 +423,11 @@ const CORR_SLOT_LEN: usize = Color::COUNT * CorrChannel::COUNT;
 /// Number of `i16` entries a pawn-history slot holds (`[pc][to]`).
 const PAWN_SLOT_LEN: usize = PIECE_NB * SQ_NB;
 
-/// The reference `SharedHistories`: the unified correction history and the pawn
-/// history, **shared between the worker threads of one NUMA node** and sized by
-/// that node's thread count, so that a larger node gets a proportionally larger,
-/// less-contended table.
+/// The reference `SharedHistories`: the unified correction history, the pawn
+/// history and the continuation history, **shared between the worker threads
+/// of one NUMA node**. The correction and pawn tables are sized by that node's
+/// thread count, so that a larger node gets a proportionally larger,
+/// less-contended table; the continuation table has a fixed shape.
 ///
 /// `thread_count` must be a non-zero power of two, which is what makes slot
 /// selection a single mask over the full 64-bit key.
@@ -438,6 +442,8 @@ pub struct SharedHistories {
     pawn: LargePageArray<AtomicI16>,
     /// `pawnHistory.get_size() - 1` — the pawn slot mask.
     pawn_mask: usize,
+    /// `continuationHistory[in_check][capture][pc][to]` planes.
+    continuation: ContinuationHistory,
 }
 
 impl SharedHistories {
@@ -460,19 +466,21 @@ impl SharedHistories {
             corr_mask: corr_slots - 1,
             pawn: LargePageArray::zeroed(pawn_slots * PAWN_SLOT_LEN),
             pawn_mask: pawn_slots - 1,
+            continuation: ContinuationHistory::new(),
         };
-        // The correction fill of `0` is a no-op on the zeroed allocation, but is
-        // written explicitly so that every page is first-touched on the node.
+        // Every fill runs here, so that every page is first-touched on the node.
         out.clear();
         out
     }
 
-    /// Reset both tables in place to the reference `clear()` init — correction
-    /// `0`, pawn `-1238` — the state [`Self::new`] builds. A new game reuses the
-    /// node's tables this way, their pages staying where they were first touched.
+    /// Reset every table in place to the reference `clear()` init — correction
+    /// `-5`, pawn `-1338`, continuation `-586` — the state [`Self::new`] builds.
+    /// A new game reuses the node's tables this way, their pages staying where
+    /// they were first touched.
     pub fn clear(&self) {
         self.fill_correction(CORRECTION_INIT);
         self.fill_pawn(PAWN_INIT);
+        self.continuation.fill(CONTINUATION_INIT);
     }
 
     /// The node's thread count (the slot multiplier).
@@ -490,6 +498,11 @@ impl SharedHistories {
         self.pawn_mask + 1
     }
 
+    /// The node's continuation history.
+    pub fn continuation(&self) -> &ContinuationHistory {
+        &self.continuation
+    }
+
     /// Overwrite every correction entry with `v`.
     pub fn fill_correction(&self, v: i16) {
         for e in self.correction.iter() {
@@ -504,12 +517,16 @@ impl SharedHistories {
         }
     }
 
-    /// Snapshots of both tables, for tests comparing a reset set against a fresh
+    /// Snapshots of the tables, for tests comparing a reset set against a fresh
     /// one.
     #[cfg(test)]
-    pub(crate) fn raw(&self) -> (Vec<i16>, Vec<i16>) {
+    pub(crate) fn raw(&self) -> (Vec<i16>, Vec<i16>, Vec<i16>) {
         let load = |t: &[AtomicI16]| t.iter().map(|e| e.load(Ordering::Relaxed)).collect();
-        (load(&self.correction), load(&self.pawn))
+        (
+            load(&self.correction),
+            load(&self.pawn),
+            load(&self.continuation.table),
+        )
     }
 
     /// Flat index of the `channel` entry for side-to-move `color` in the slot
@@ -655,13 +672,16 @@ impl ContinuationCorrectionHistory {
     }
 }
 
-/// The worker's `continuationHistory`: planes keyed by
-/// `(in_check, capture, moved_piece, to)`, each a [`PieceToHistory`]. A search
-/// stack cell points at one such plane, and the update primitives write the
-/// current move's `[pc][to]` within it.
+/// The `continuationHistory`: planes keyed by `(in_check, capture,
+/// moved_piece, to)`, each a `[pc][to]` plane. A search stack cell points at
+/// one such plane, and the update primitives write the current move's
+/// `[pc][to]` within it.
+///
+/// It lives in [`SharedHistories`], so its entries are atomic and its methods
+/// take `&self`; updates race exactly as `apply_gravity_atomic` describes.
 pub struct ContinuationHistory {
     /// Flat over `[plane][inner_pc][inner_to]`.
-    table: LargePageArray<i16>,
+    table: LargePageArray<AtomicI16>,
 }
 
 impl Default for ContinuationHistory {
@@ -683,15 +703,11 @@ impl ContinuationHistory {
         Self::default()
     }
 
-    /// Overwrite every entry with `v`; the reference's init is `-523`.
-    pub fn fill(&mut self, v: i16) {
-        self.table.iter_mut().for_each(|e| *e = v);
-    }
-
-    /// The whole table, for tests comparing a reset table against a fresh one.
-    #[cfg(test)]
-    pub(crate) fn raw(&self) -> &[i16] {
-        &self.table
+    /// Overwrite every entry with `v`; the reference's init is `-586`.
+    pub fn fill(&self, v: i16) {
+        for e in self.table.iter() {
+            e.store(v, Ordering::Relaxed);
+        }
     }
 
     /// The plane index selected by `(in_check, capture, pc, to)`.
@@ -707,12 +723,12 @@ impl ContinuationHistory {
 
     /// The inner `[pc][to]` value in `plane`.
     pub fn get_at(&self, plane: usize, pc: Piece, to: Square) -> i32 {
-        self.table[Self::cell(plane, pc, to)] as i32
+        self.table[Self::cell(plane, pc, to)].load(Ordering::Relaxed) as i32
     }
 
     /// The whole of `plane`, indexed by [`piece_to_index`]: `get_at` for every
     /// move of one node, with the plane bounds-checked once.
-    pub fn plane(&self, plane: usize) -> &[i16; PIECE_TO_LEN] {
+    pub fn plane(&self, plane: usize) -> &[AtomicI16; PIECE_TO_LEN] {
         let base = plane * Self::PLANE_LEN;
         self.table[base..base + Self::PLANE_LEN]
             .try_into()
@@ -720,18 +736,12 @@ impl ContinuationHistory {
     }
 
     /// Gravity-update the inner `[pc][to]` entry in `plane`.
-    pub fn update_at(&mut self, plane: usize, pc: Piece, to: Square, bonus: i32) {
-        let i = Self::cell(plane, pc, to);
-        self.table[i] = apply_gravity(self.table[i], bonus, CONTINUATION_HISTORY_D);
-    }
-
-    /// Copy `plane` out into a standalone [`PieceToHistory`], which is the form
-    /// [`crate::MovePicker`] reads continuation planes in.
-    pub fn clone_plane(&self, plane: usize) -> PieceToHistory {
-        let mut out = PieceToHistory::new();
-        let base = plane * Self::PLANE_LEN;
-        out.copy_from_slice(&self.table[base..base + Self::PLANE_LEN]);
-        out
+    pub fn update_at(&self, plane: usize, pc: Piece, to: Square, bonus: i32) {
+        apply_gravity_atomic(
+            &self.table[Self::cell(plane, pc, to)],
+            bonus,
+            CONTINUATION_HISTORY_D,
+        );
     }
 }
 
@@ -804,10 +814,13 @@ mod index_tests {
         assert_eq!(m.moved_piece_after(), pc);
         let i = piece_to_index(m);
 
-        let mut cont = ContinuationHistory::new();
+        let cont = ContinuationHistory::new();
         let plane = ContinuationHistory::plane_index(true, false, pc, to);
         cont.update_at(plane, pc, to, 1234);
-        assert_eq!(cont.plane(plane)[i] as i32, cont.get_at(plane, pc, to));
+        assert_eq!(
+            cont.plane(plane)[i].load(Ordering::Relaxed) as i32,
+            cont.get_at(plane, pc, to)
+        );
         assert_ne!(cont.get_at(plane, pc, to), 0);
 
         let mut main = ButterflyHistory::new();
@@ -881,17 +894,21 @@ mod shared_tests {
         let _ = SharedHistories::new(0);
     }
 
-    /// Init values: pawn `-1238`, correction `0`, across distinct slots.
+    /// Init values: pawn `-1338`, correction `-5`, continuation `-586`, across
+    /// distinct slots.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn init_values() {
         let sh = SharedHistories::new(1);
-        assert_eq!(sh.pawn_get(0, bp(), to()), -1238);
-        assert_eq!(sh.pawn_get(0xFFFF, bp(), to()), -1238);
+        assert_eq!(sh.pawn_get(0, bp(), to()), -1338);
+        assert_eq!(sh.pawn_get(0xFFFF, bp(), to()), -1338);
+        let last_plane = ContinuationHistory::plane_index(true, true, bp(), to());
+        assert_eq!(sh.continuation().get_at(0, bp(), to()), -586);
+        assert_eq!(sh.continuation().get_at(last_plane, bp(), to()), -586);
         for &color in &[Color::Black, Color::White] {
             for &ch in &CHANNELS {
-                assert_eq!(sh.correction_get(0, color, ch), 0);
-                assert_eq!(sh.correction_get(0xFFFF, color, ch), 0);
+                assert_eq!(sh.correction_get(0, color, ch), -5);
+                assert_eq!(sh.correction_get(0xFFFF, color, ch), -5);
             }
         }
     }
@@ -936,24 +953,50 @@ mod shared_tests {
         let key_b = CORRHIST_BASE_SIZE as u64; // 65536
 
         let one = SharedHistories::new(1);
+        let b_before = one.correction_get(key_b, Color::Black, CorrChannel::Pawn);
         one.correction_update(key_a, Color::Black, CorrChannel::Pawn, 1_000_000);
         assert_ne!(
             one.correction_get(key_b, Color::Black, CorrChannel::Pawn),
-            0,
+            b_before,
             "thread_count 1: correction keys 0 and 65536 share a slot"
         );
 
         let two = SharedHistories::new(2);
+        let b_before = two.correction_get(key_b, Color::Black, CorrChannel::Pawn);
         two.correction_update(key_a, Color::Black, CorrChannel::Pawn, 1_000_000);
         assert_ne!(
             two.correction_get(key_a, Color::Black, CorrChannel::Pawn),
-            0
+            b_before
         );
         assert_eq!(
             two.correction_get(key_b, Color::Black, CorrChannel::Pawn),
-            0,
+            b_before,
             "thread_count 2: correction keys 0 and 65536 are in distinct slots"
         );
+    }
+
+    /// Two threads racing the unguarded load-modify-store on one entry are free
+    /// of undefined behaviour (miri's race detector checks this; the full
+    /// tables are too large for it), and the entry stays within `[-D, D]`.
+    #[test]
+    fn racing_gravity_updates_are_data_race_free() {
+        let cell = Arc::new(AtomicI16::new(-523));
+        let handles: Vec<_> = (0..2)
+            .map(|t| {
+                let cell = Arc::clone(&cell);
+                std::thread::spawn(move || {
+                    for i in 0..50i32 {
+                        let bonus = if (i + t) % 2 == 0 { 9000 } else { -7000 };
+                        apply_gravity_atomic(&cell, bonus, CONTINUATION_HISTORY_D);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("update thread must not panic");
+        }
+        let v = cell.load(Ordering::Relaxed) as i32;
+        assert!(v.abs() <= CONTINUATION_HISTORY_D, "value {v} exceeds D");
     }
 
     /// Atomicity smoke: two threads hammering the same entry with `<<` terminates
@@ -972,6 +1015,7 @@ mod shared_tests {
                         let bonus = if (i + t) % 2 == 0 { 5000 } else { -5000 };
                         sh.pawn_update(key, bp(), to(), bonus);
                         sh.correction_update(key, Color::White, CorrChannel::Minor, bonus);
+                        sh.continuation().update_at(7, bp(), to(), bonus);
                     }
                 })
             })
@@ -985,6 +1029,11 @@ mod shared_tests {
         assert!(
             cv.abs() <= CORRECTION_HISTORY_D,
             "correction value {cv} exceeds D"
+        );
+        let nv = sh.continuation().get_at(7, bp(), to());
+        assert!(
+            nv.abs() <= CONTINUATION_HISTORY_D,
+            "continuation value {nv} exceeds D"
         );
     }
 }
