@@ -15,3 +15,7 @@ publish = false
 # targets never pull it in.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Set by `.cargo/config.toml` for `wasm32-wasip1`, the build that has no threads.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(attic_single_thread)"] }

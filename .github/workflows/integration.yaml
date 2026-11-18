@@ -65,6 +65,33 @@ env:
 # (`hce_fit_qsearched`) changes only the coefficients, which that test does not
 # read, so it is not a row of its own.
 jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: wasm/core/package-lock.json
+      - run: rustup target add wasm32-wasip1 wasm32-wasip1-threads
+      - name: Build both WASM targets
+        run: |
+          unset RUSTFLAGS
+          cargo build --locked --release -p attic-wasm --target wasm32-wasip1 --features hce_material_17
+          cargo build --locked --release -p attic-wasm --target wasm32-wasip1-threads --features hce_material_17
+      - run: cargo build --locked --release -p attic --features hce_material_17
+      - run: npm --prefix wasm/core ci
+      - run: npm --prefix wasm/core run build
+      - name: Compare WASM and native USI searches
+        run: >-
+          timeout 30s node wasm/core/test/smoke.mjs
+          target/wasm32-wasip1/release/attic_wasm.wasm
+          target/wasm32-wasip1-threads/release/attic_wasm.wasm
+          target/release/attic
+
   fmt:
     runs-on: ubuntu-latest
     steps:

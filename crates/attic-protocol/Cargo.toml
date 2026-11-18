@@ -53,3 +53,7 @@ threat_force_refresh = ["attic-search/threat_force_refresh"]
 [dev-dependencies]
 serde = { version = "~1.0", features = ["derive"] }
 serde_json = "~1.0"
+
+# Set by `.cargo/config.toml` for `wasm32-wasip1`, the build that has no threads.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(attic_single_thread)"] }
