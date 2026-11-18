@@ -121,6 +121,16 @@ ATTIC_SIRIUS_REF=<sirius-ref> RUSTFLAGS="-C target-cpu=x86-64-v2" \
   --test sirius_parity --test sirius_incremental --test sirius_fv_scale -- --nocapture
 ```
 
+### つようら王11 Micro / Mini
+
+Micro は `sfnn_ka2_2048_8_64_progress8x`、Mini は `sfnn_ka2_4096_8_64_progress8x` でビルドします。
+[配布](https://yaneuraou.yaneu.com/2026/10/14/tsuyou-11-mini-micro-released-under-mit-license/)の `nn.bin` と `progress.bin` を同じ `EvalDir` に置き、USI の `FV_SCALE` を 24 に設定してください。
+どちらも K-A2 特徴量を使い、進行度だけで 8 つの層スタックを選びます。
+
+```sh
+cargo build --release -p attic --no-default-features --features sfnn_ka2_2048_8_64_progress8x
+```
+
 ## 探索速度
 
 **この節の値は V9.80 に基準を置いていた時点の Attic と YaneuraOu V9.80 で測ったもの**で、V9.96 では測り直していません。V9.96 の追従で探索・置換表・履歴表が変わっているので、速度比は変わっている可能性があります。
@@ -147,6 +157,8 @@ SFNN の 2 つは、YaneuraOu 側が shielune 版です。遅い原因は調べ�
 | SFNN | `halfkahm2_1024_15_64_progress8ek`    |
 | SFNN | `halfkahm2_2304_15_64_progress8ek`    |
 | SFNN | `halfkahm2_threat_1024_15_64_8gp`     |
+| SFNN | `ka2_2048_8_64_progress8x`             |
+| SFNN | `ka2_4096_8_64_progress8x`             |
 | NNUE | `kp_256x2_32_32`                      |
 | NNUE | `kp_128x2_32_32`                      |
 | NNUE | `halfkp_256x2_32_32`                  |

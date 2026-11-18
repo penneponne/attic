@@ -74,3 +74,14 @@ fn startpos_choice_is_legal_deterministic_and_matches_full_refresh() {
         "greedy choice diverged from the full-refresh argmax"
     );
 }
+
+#[cfg(feature = "sfnn_ka2")]
+#[test]
+fn network_constructor_loads_tuyoura_progress() {
+    let Some(dir) = std::env::var_os("ATTIC_TUYOURA_EVAL") else {
+        eprintln!("set ATTIC_TUYOURA_EVAL to the distributed evaluation directory");
+        return;
+    };
+    Search::from_network_file(&PathBuf::from(dir).join("nn.bin")).unwrap();
+    assert!(attic_eval::progress::parameters().is_some());
+}

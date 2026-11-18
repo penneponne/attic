@@ -33,6 +33,8 @@ sfnn_halfkahm2_1536_15_32_k3k3 = ["sfnn"]
 sfnn_halfkahm2_1024_15_64_progress8kpabs = ["sfnn_progress"]
 sfnn_halfkahm2_1024_15_64_progress8ek = ["sfnn_progress_ek"]
 sfnn_halfkahm2_2304_15_64_progress8ek = ["sfnn_progress_ek"]
+sfnn_ka2_2048_8_64_progress8x = ["sfnn_ka2"]
+sfnn_ka2_4096_8_64_progress8x = ["sfnn_ka2"]
 # Sirius's network, read as it ships: HalfKA_hm2 plus the threat features (the
 # attacks between the pieces on the board), eight layer stacks chosen by an
 # integer game-phase sum and blended across a stack boundary. It has no
@@ -89,6 +91,8 @@ threat_force_refresh = []
 sfnn = []
 sfnn_progress = ["sfnn"]
 sfnn_progress_ek = ["sfnn_progress"]
+# K-A2 progress-only shapes used by TuyouraOu 11 Micro and Mini.
+sfnn_ka2 = ["sfnn_progress"]
 sfnn_threat = ["sfnn"]
 nnue_standard = []
 nnue_kp = []

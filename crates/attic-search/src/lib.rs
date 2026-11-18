@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use attic_eval::{Accumulator, NnueError, NnueNetwork, evaluate_with, load_network};
+use attic_eval::{Accumulator, NnueError, NnueNetwork, evaluate_with};
 use attic_state::{Move, Position};
 
 pub mod book;
@@ -111,7 +111,7 @@ impl Search {
     /// Load and validate the network at `path`, then wrap it, discarding any
     /// non-fatal warnings.
     pub fn from_network_file(path: &Path) -> Result<Self, NnueError> {
-        Ok(Self::new(load_network(path)?))
+        Self::from_network_file_with_warnings(path).map(|(search, _)| search)
     }
 
     /// [`Search::from_network_file`] returning the loader's non-fatal warning
@@ -125,7 +125,7 @@ impl Search {
         #[cfg(not(feature = "sfnn_progress"))]
         let (net, warnings) = attic_eval::load_network_with_warnings(path)?;
 
-        // The progress shapes (1024 and 2304) read their layer-stack
+        // The progress shapes read their layer-stack
         // coefficients from a `progress.bin` next to `nn.bin` rather than from
         // inside it, so the load is two files. A missing or malformed one is
         // reported as a warning and leaves every position in bucket 0 — wrong,
@@ -227,9 +227,8 @@ impl Search {
     }
 }
 
-// These build a HalfKA_hm2 network by hand: feature-plane geometry below, and a
-// shortcut row in fc_0 that only the SFNN shapes have. The standard shapes have
-// neither (`HIDDEN1_DIMS` is all of fc_0), and Manaka's have no builder at all.
+// The synthetic SFNN networks below use the board-plane layout shared by
+// HalfKA_hm2 and K-A2.
 #[cfg(all(test, feature = "sfnn"))]
 mod tests {
     use super::*;
@@ -254,9 +253,8 @@ mod tests {
     const LANE_B: usize = HIDDEN_SIZE / 2;
 
     /// A synthetic network whose zero biases make the accumulator a pure sum of
-    /// active feature columns, and whose only nonzero FC weights route the two
-    /// live lanes through the shortcut, so that the network output is
-    /// `transformed[LANE_A] + transformed[LANE_B]`.
+    /// active feature columns. The live lanes feed either the shortcut or
+    /// the clipped-ReLU path in a shape without a shortcut.
     fn net_with_ft(ft_weights: LargePageArray<i16>) -> NnueNetwork {
         let header = NetHeader {
             version: 0,
@@ -265,11 +263,19 @@ mod tests {
         };
         let mut b = NnueNetworkBuilder::new(header, [0u8; 32]);
         b.ft_weights_mut().copy_from_slice(&ft_weights);
-        let row = HIDDEN1_DIMS * FC_0_PADDED_INPUT_DIMS;
         for s in 0..b.layer_stacks() {
-            let w = b.fc_0_weights_mut(s);
-            w[row + LANE_A] = 1;
-            w[row + LANE_B] = 1;
+            if cfg!(feature = "sfnn_ka2") {
+                let w = b.fc_0_weights_mut(s);
+                w[LANE_A] = 64;
+                w[LANE_B] = 64;
+                b.fc_1_weights_mut(s)[HIDDEN1_DIMS] = 64;
+                b.fc_2_weights_mut(s)[0] = 16;
+            } else {
+                let row = HIDDEN1_DIMS * FC_0_PADDED_INPUT_DIMS;
+                let w = b.fc_0_weights_mut(s);
+                w[row + LANE_A] = 1;
+                w[row + LANE_B] = 1;
+            }
         }
         b.build()
     }
@@ -286,7 +292,12 @@ mod tests {
     fn material_ft(w: i16) -> LargePageArray<i16> {
         let mut ft = LargePageArray::<i16>::zeroed(HIDDEN_SIZE * NUM_FEATURES);
         for f in 0..NUM_FEATURES {
-            if (BOARD_LO..BOARD_HI).contains(&(f % E_KING_PERIOD)) {
+            let code = if cfg!(feature = "sfnn_ka2") {
+                f
+            } else {
+                f % E_KING_PERIOD
+            };
+            if (BOARD_LO..BOARD_HI).contains(&code) {
                 ft[f * HIDDEN_SIZE + LANE_A] = w;
                 ft[f * HIDDEN_SIZE + LANE_B] = w;
             }

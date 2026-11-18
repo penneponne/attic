@@ -87,6 +87,10 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: tuyoura-micro
+            args: --features sfnn_ka2_2048_8_64_progress8x
+          - name: tuyoura-mini
+            args: --features sfnn_ka2_4096_8_64_progress8x
           - name: sfnn-threat
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp
@@ -201,6 +205,10 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: tuyoura-micro
+            args: --features sfnn_ka2_2048_8_64_progress8x
+          - name: tuyoura-mini
+            args: --features sfnn_ka2_4096_8_64_progress8x
           - name: sfnn-threat
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp
@@ -245,6 +253,10 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: tuyoura-micro
+            args: --features sfnn_ka2_2048_8_64_progress8x
+          - name: tuyoura-mini
+            args: --features sfnn_ka2_4096_8_64_progress8x
           - name: sfnn-threat
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp

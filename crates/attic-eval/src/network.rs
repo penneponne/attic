@@ -15,6 +15,7 @@
 //! activations, whose results concatenate `[sqr(15) | relu(15)]` into L2's
 //! input; L2 (→ 32) is followed by a clipped ReLU, then L3 (→ 1). The 16th L1
 //! output is raw, pre-ReLU, and is added to L3's output as the shortcut term.
+//! K-A2 uses eight L1 outputs as inputs to both activations.
 //! The result is divided by the live [`fv_scale`] to produce the score.
 
 use attic_state::Position;
@@ -273,8 +274,15 @@ fn per_layer_flow_u7(transformed: &[u8; FC_0_INPUT_DIMS], stack: &NetworkStack) 
         FC_2_PADDED_INPUT_DIMS,
     );
 
-    // The shortcut output is raw, pre-ReLU, and can be negative.
-    fc_2_out[0].wrapping_add(fc_0_out[HIDDEN1_DIMS])
+    // K-A2 uses all eight outputs as activations and has no shortcut.
+    #[cfg(feature = "sfnn_ka2")]
+    {
+        fc_2_out[0]
+    }
+    #[cfg(not(feature = "sfnn_ka2"))]
+    {
+        fc_2_out[0].wrapping_add(fc_0_out[HIDDEN1_DIMS])
+    }
 }
 
 /// The unfused layer-stack forward pass. Compiled unconditionally so that the
@@ -386,8 +394,15 @@ fn per_layer_flow_unfused(transformed: &[u8; FC_0_INPUT_DIMS], stack: &NetworkSt
         FC_2_PADDED_INPUT_DIMS,
     );
 
-    // The shortcut output is raw, pre-ReLU, and can be negative.
-    fc_2_out[0].wrapping_add(fc_0_out[HIDDEN1_DIMS])
+    // K-A2 uses all eight outputs as activations and has no shortcut.
+    #[cfg(feature = "sfnn_ka2")]
+    {
+        fc_2_out[0]
+    }
+    #[cfg(not(feature = "sfnn_ka2"))]
+    {
+        fc_2_out[0].wrapping_add(fc_0_out[HIDDEN1_DIMS])
+    }
 }
 
 #[cfg(test)]
@@ -465,7 +480,7 @@ mod tests {
         assert_eq!(per_layer_flow(&transformed, &net.stacks[0]), 0);
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
     #[test]
     fn forward_wires_shortcut_and_chain() {
         // The reference's `classic_chain_with_ewm_and_shortcut` wiring:
