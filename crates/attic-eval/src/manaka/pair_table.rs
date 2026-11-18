@@ -13,6 +13,12 @@
 //! added (`pair.rs`). That is exact, so what the sums see is what an `f32` table
 //! widened at load would give, and the table is half the size: `2 · PAIR` halves a
 //! row is the `PAIR` `f32`s a row of the single-frame table took.
+//!
+//! The table can also be held as bytes, half the size again: the reads of a derive
+//! are rows picked at random from a table of 88 to 352 MB, so the bytes a row takes
+//! are what the memory is asked for. [`PairPrecision`] names the two ways to round a
+//! half to a byte, and `ATTIC_SYNN_PAIR` picks one when a network is loaded. The file
+//! is the same either way; the rounding is done once, at load.
 
 use crate::Aligned64;
 
@@ -21,19 +27,75 @@ use super::PAIR;
 use super::PAIR_ROWS;
 use super::reader::half_to_f32;
 
-/// `[PAIR_ROWS][2][PAIR]` halves: for each pair as the black frame numbers it,
+/// Entries in a row of the table: both frames' channels.
+pub(super) const ROW: usize = 2 * PAIR;
+
+/// Bytes a row takes when each half has a scale of its own (`i8row`): the `i8`
+/// entries, then one `f32` scale for the black frame's channels and one for the
+/// white frame's.
+pub(super) const SCALED_ROW: usize = ROW + 8;
+
+/// How many levels a byte has on each side of zero: `-128` is left out so that
+/// the range is symmetric.
+const LEVELS: f32 = 127.0;
+
+/// `127³`: a cube-rounded entry is `q³ · max / 127³` for `q` in `−127..=127`.
+const CUBE_LEVELS: f64 = 127.0 * 127.0 * 127.0;
+
+/// How the pair table is held, as `ATTIC_SYNN_PAIR` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairPrecision {
+    /// The halves of the file, widened when they are added. The default.
+    F16,
+    /// A byte per entry, `q³` times a scale per channel: the entry is the signed
+    /// cube root of its size against the channel's largest, rounded to 127 levels
+    /// a side. Small entries get fine steps and large ones coarse, which is what
+    /// the pair table's entries (mostly small, a few large) want; one scale for a
+    /// channel costs nothing per row.
+    I8,
+    /// A byte per entry and a scale for each half of a row, `f32`: the entry is
+    /// `q · scale`, 127 levels of the half's largest. Eight bytes more a row.
+    I8Row,
+}
+
+impl PairPrecision {
+    /// `i8` and `i8row`, in any case, name those two; anything else, or nothing,
+    /// is `F16`, the default.
+    pub fn from_name(name: Option<&str>) -> PairPrecision {
+        match name {
+            Some(n) if n.eq_ignore_ascii_case("i8") => PairPrecision::I8,
+            Some(n) if n.eq_ignore_ascii_case("i8row") => PairPrecision::I8Row,
+            _ => PairPrecision::F16,
+        }
+    }
+}
+
+/// What the table holds.
+#[derive(Debug)]
+pub(super) enum Cells {
+    /// `[PAIR_ROWS][ROW]` halves.
+    Halves(Aligned64<u16>),
+    /// `[PAIR_ROWS][ROW]` bytes (`i8`), and the factor each channel's `q³` is
+    /// multiplied by, the same for both frames.
+    Cubes { q: Aligned64<u8>, scale: [f32; ROW] },
+    /// `[PAIR_ROWS][SCALED_ROW]` bytes: a row's `ROW` entries (`i8`), then its two
+    /// scales as little-endian `f32`.
+    Scaled { q: Aligned64<u8> },
+}
+
+/// `[PAIR_ROWS][2][PAIR]` entries: for each pair as the black frame numbers it,
 /// that pair's row of the file, then the row of the same two pieces as the white
 /// frame numbers them. Empty in a shape without a pair table.
 #[derive(Debug)]
 pub struct PairTable {
-    halves: Aligned64<u16>,
+    cells: Cells,
 }
 
 impl PairTable {
     /// The table of a shape without one.
     pub(super) fn empty() -> PairTable {
         PairTable {
-            halves: Aligned64::zeroed(0),
+            cells: Cells::Halves(Aligned64::zeroed(0)),
         }
     }
 
@@ -66,22 +128,69 @@ impl PairTable {
                 row += 1;
             }
         }
-        PairTable { halves }
+        PairTable {
+            cells: Cells::Halves(halves),
+        }
     }
 
     /// Rows, one per pair: `PAIR_ROWS`, or none without a pair table.
     pub fn rows(&self) -> usize {
         if PAIR == 0 {
-            0
-        } else {
-            self.halves.len() / (2 * PAIR)
+            return 0;
+        }
+        match &self.cells {
+            Cells::Halves(halves) => halves.len() / ROW,
+            Cells::Cubes { q, .. } => q.len() / ROW,
+            Cells::Scaled { q } => q.len() / SCALED_ROW,
         }
     }
 
-    /// Every half, `[rows][2][PAIR]`.
+    /// What the table holds, for the kernels that add rows (`pair.rs`).
+    #[cfg(feature = "sym_token")]
+    pub(super) fn cells(&self) -> &Cells {
+        &self.cells
+    }
+
+    /// Every half, `[rows][2][PAIR]`. Only a table that has not been rounded to
+    /// bytes has them.
+    ///
+    /// # Panics
+    /// Panics if the table was rounded by [`use_precision`](Self::use_precision).
     #[cfg(any(test, feature = "sym_token"))]
     pub(super) fn halves(&self) -> &[u16] {
-        &self.halves
+        match &self.cells {
+            Cells::Halves(halves) => halves,
+            _ => panic!("the pair table was rounded to bytes and no longer has its halves"),
+        }
+    }
+
+    /// Which [`PairPrecision`] the table is held in.
+    pub fn precision(&self) -> PairPrecision {
+        match &self.cells {
+            Cells::Halves(_) => PairPrecision::F16,
+            Cells::Cubes { .. } => PairPrecision::I8,
+            Cells::Scaled { .. } => PairPrecision::I8Row,
+        }
+    }
+
+    /// Hold the table at `precision`: the halves of the file rounded to bytes, and
+    /// the halves dropped.
+    ///
+    /// Rounding is one way. A table already rounded is left as it is, whatever
+    /// `precision` says, since its halves are gone; [`PairPrecision::F16`] leaves
+    /// the table alone.
+    pub fn use_precision(&mut self, precision: PairPrecision) {
+        if PAIR == 0 {
+            return;
+        }
+        let Cells::Halves(halves) = &self.cells else {
+            return;
+        };
+        self.cells = match precision {
+            PairPrecision::F16 => return,
+            PairPrecision::I8 => cube_cells(halves),
+            PairPrecision::I8Row => scaled_cells(halves),
+        };
     }
 
     /// The file's entry at `row` and `channel`, widened: the table both frames
@@ -92,8 +201,23 @@ impl PairTable {
     pub fn value(&self, row: usize, channel: usize) -> f32 {
         let channels = PAIR;
         assert!(channel < channels, "channel {channel} of {channels}");
-        half_to_f32(self.halves[row * 2 * PAIR + channel])
-            .expect("the reader found every half finite")
+        match &self.cells {
+            Cells::Halves(halves) => half_to_f32(halves[row * ROW + channel])
+                .expect("the reader found every half finite"),
+            Cells::Cubes { q, scale } => {
+                let level = f32::from(q[row * ROW + channel] as i8);
+                level * level * level * scale[channel]
+            }
+            Cells::Scaled { q } => {
+                let at = row * SCALED_ROW;
+                let scale = f32::from_le_bytes(
+                    q[at + ROW..at + ROW + 4]
+                        .try_into()
+                        .expect("a scale is four bytes"),
+                );
+                f32::from(q[at + channel] as i8) * scale
+            }
+        }
     }
 
     /// The file's table, `[PAIR_ROWS][PAIR]`, widened: for the tests that write a
@@ -109,7 +233,105 @@ impl PairTable {
     /// A second copy, for another NUMA node.
     pub(super) fn replicate(&self) -> PairTable {
         PairTable {
-            halves: Aligned64::from_slice(&self.halves),
+            cells: match &self.cells {
+                Cells::Halves(halves) => Cells::Halves(Aligned64::from_slice(halves)),
+                Cells::Cubes { q, scale } => Cells::Cubes {
+                    q: Aligned64::from_slice(q),
+                    scale: *scale,
+                },
+                Cells::Scaled { q } => Cells::Scaled {
+                    q: Aligned64::from_slice(q),
+                },
+            },
         }
     }
+}
+
+/// The level of `x` among the cubes: the `q` in `0..=127` for which `q³` is nearest
+/// `size`, where `size` is `|x|` in units of the channel's largest times `127³`.
+fn cube_level(size: f64) -> u8 {
+    let guess = size.cbrt().round().clamp(0.0, 127.0) as i64;
+    let distance = |q: i64| (size - (q * q * q) as f64).abs();
+    (guess - 1..=guess + 1)
+        .filter(|q| (0..=127).contains(q))
+        .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+        .expect("the guess is a level") as u8
+}
+
+/// The table rounded by [`PairPrecision::I8`]. One look-up per half: for each
+/// channel, the byte every one of the 65,536 halves rounds to, so that the table is
+/// read once and no cube root is taken per entry.
+// `as_chunks` refuses a chunk of zero, which is what `PAIR` is in a shape without a
+// pair table; those never get here (`use_precision`), but they are compiled.
+#[allow(clippy::chunks_exact_to_as_chunks)]
+fn cube_cells(halves: &[u16]) -> Cells {
+    let size = |h: u16| half_to_f32(h).map_or(0.0, f32::abs);
+    // A channel's largest entry, over both frames' rows (which are the same rows of
+    // the file, so it is the file's channel).
+    let mut largest = [0.0f32; PAIR];
+    for row in halves.chunks_exact(PAIR) {
+        for (m, &h) in largest.iter_mut().zip(row) {
+            *m = m.max(size(h));
+        }
+    }
+    let lookup: Vec<u8> = largest
+        .iter()
+        .flat_map(|&max| {
+            (0..=u16::MAX).map(move |bits| {
+                if max == 0.0 {
+                    return 0;
+                }
+                let level = cube_level(f64::from(size(bits)) / f64::from(max) * CUBE_LEVELS);
+                // The sign of a half is its top bit; a zero keeps level 0 either way.
+                if bits & 0x8000 != 0 {
+                    (level as i8).wrapping_neg() as u8
+                } else {
+                    level
+                }
+            })
+        })
+        .collect();
+    let mut q = Aligned64::<u8>::zeroed(halves.len());
+    for (dst, src) in q.chunks_exact_mut(PAIR).zip(halves.chunks_exact(PAIR)) {
+        for ((d, &h), table) in dst.iter_mut().zip(src).zip(lookup.chunks_exact(65_536)) {
+            *d = table[usize::from(h)];
+        }
+    }
+    let per_channel: [f32; PAIR] =
+        std::array::from_fn(|c| (f64::from(largest[c]) / CUBE_LEVELS) as f32);
+    let mut scale = [0.0f32; ROW];
+    scale[..PAIR].copy_from_slice(&per_channel);
+    scale[PAIR..].copy_from_slice(&per_channel);
+    Cells::Cubes { q, scale }
+}
+
+/// The table rounded by [`PairPrecision::I8Row`]: each half of a row to 127 levels
+/// of its own largest entry.
+// As `cube_cells`: `PAIR` may be zero where this is compiled but not called.
+#[allow(clippy::chunks_exact_to_as_chunks)]
+fn scaled_cells(halves: &[u16]) -> Cells {
+    // `ROW` is zero in a shape without a pair table, which never gets here; the
+    // division is checked so that the build of that shape's tests compiles.
+    let rows = halves.len().checked_div(ROW).unwrap_or(0);
+    let mut q = Aligned64::<u8>::zeroed(rows * SCALED_ROW);
+    for (dst, src) in q.chunks_exact_mut(SCALED_ROW).zip(halves.chunks_exact(ROW)) {
+        let (entries, scales) = dst.split_at_mut(ROW);
+        for (half, (entries, scale)) in src.chunks_exact(PAIR).zip(
+            entries
+                .chunks_exact_mut(PAIR)
+                .zip(scales.chunks_exact_mut(4)),
+        ) {
+            let values: [f32; PAIR] = std::array::from_fn(|i| half_to_f32(half[i]).unwrap_or(0.0));
+            let largest = values.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            if largest == 0.0 {
+                continue;
+            }
+            let step = largest / LEVELS;
+            for (e, v) in entries.iter_mut().zip(values) {
+                *e = ((v / step).round_ties_even().clamp(-LEVELS, LEVELS) as i8) as u8;
+            }
+            scale.copy_from_slice(&step.to_le_bytes());
+        }
+    }
+    Cells::Scaled { q }
 }

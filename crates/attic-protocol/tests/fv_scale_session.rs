@@ -137,6 +137,121 @@ fn eval_options_override_applies_at_isready() {
 #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
 #[test]
 #[cfg_attr(miri, ignore)]
+fn accepted_override_is_printed_once_across_isreadys() {
+    let dir = TempDir::new("once");
+    write_synthetic_nn_bin(dir.path());
+    std::fs::write(dir.path().join("eval_options.txt"), "FV_SCALE=24\n").expect("write file");
+    let evaldir = dir.path().to_str().expect("utf-8 temp path");
+
+    let out = drive(&format!(
+        "usi\nsetoption name EvalDir value {evaldir}\nisready\nisready\nquit\n"
+    ));
+
+    assert_eq!(
+        out.matches("info string read engine options, path = ")
+            .count(),
+        2,
+        "each isready re-reads the file:\n{out}"
+    );
+    assert_eq!(
+        out.matches(OVERRIDE_LINE).count(),
+        1,
+        "the override is printed only when first applied:\n{out}"
+    );
+    assert_eq!(out.matches("readyok").count(), 2, "{out}");
+}
+
+#[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn override_in_a_non_canonical_spelling_is_silent_when_re_read() {
+    let dir = TempDir::new("plus");
+    write_synthetic_nn_bin(dir.path());
+    std::fs::write(dir.path().join("eval_options.txt"), "FV_SCALE +24\n").expect("write file");
+    let evaldir = dir.path().to_str().expect("utf-8 temp path");
+
+    let out = drive(&format!(
+        "usi\nsetoption name EvalDir value {evaldir}\nisready\nisready\nquit\n"
+    ));
+
+    // The second `isready` compares the file's text with the text the option
+    // was set with, so `+24` matches itself and nothing is printed for it.
+    assert_eq!(
+        out.matches("info string engine option override. name = FV_SCALE , value = +24\n")
+            .count(),
+        1,
+        "{out}"
+    );
+    assert!(!out.contains("rejected"), "{out}");
+    assert_eq!(out.matches("readyok").count(), 2, "{out}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn override_with_an_unlisted_combo_value_prints_the_combo_message_first() {
+    let dir = TempDir::new("combo");
+    write_synthetic_nn_bin(dir.path());
+    std::fs::write(
+        dir.path().join("eval_options.txt"),
+        "EnteringKingRule Nope\nUSI_OwnBook TRUE\n",
+    )
+    .expect("write file");
+    let evaldir = dir.path().to_str().expect("utf-8 temp path");
+
+    let out = drive(&format!(
+        "usi\nsetoption name EvalDir value {evaldir}\nisready\nquit\n"
+    ));
+
+    assert!(
+        out.contains(
+            "info string Error! : combo value not found, value = `Nope`, values = CSARule27 \
+             var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H \
+             var TryRule\n\
+             info string Error : engine option override rejected. name = EnteringKingRule , \
+             value = Nope\n\
+             info string Error : engine option override rejected. name = USI_OwnBook , \
+             value = TRUE\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn rejected_override_is_an_info_string_and_leaves_the_option_settable() {
+    let dir = TempDir::new("rejected");
+    write_synthetic_nn_bin(dir.path());
+    // The second line can only apply if the first did not fix the option.
+    std::fs::write(
+        dir.path().join("eval_options.txt"),
+        "FV_SCALE 999\nFV_SCALE 24\n",
+    )
+    .expect("write file");
+    let evaldir = dir.path().to_str().expect("utf-8 temp path");
+
+    let out = drive(&format!(
+        "usi\nsetoption name EvalDir value {evaldir}\nisready\nquit\n"
+    ));
+
+    assert!(
+        out.contains(
+            "info string Error : engine option override rejected. name = FV_SCALE , value = 999\n"
+        ),
+        "missing rejection in:\n{out}"
+    );
+    assert!(
+        out.contains(OVERRIDE_LINE),
+        "missing later override in:\n{out}"
+    );
+    assert!(
+        !out.lines().any(|l| l.starts_with("Error")),
+        "a diagnostic must be an info string:\n{out}"
+    );
+}
+
+#[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+#[test]
+#[cfg_attr(miri, ignore)]
 fn absent_eval_options_is_silent() {
     let dir = TempDir::new("absent");
     write_synthetic_nn_bin(dir.path());

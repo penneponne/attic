@@ -79,7 +79,10 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(256, 3, 32, 32)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16") {
     Dims::new(128, 3, 32, 32).pair(16)
-} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1") {
+} else if cfg!(any(
+    feature = "synn_token_128x2_32_32_pair16_o1",
+    feature = "synn_token_128x2_32_32_pair16_o1_hm"
+)) {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
     // would.
@@ -89,6 +92,15 @@ const DIMS: Dims = if cfg!(any(
 } else {
     panic!("a Manaka shape has to be selected: see the features of attic-eval")
 };
+
+/// Whether each frame is read in its horizontal-mirror canonical form (`hm`, as HalfKAv2_hm does it): when
+/// the frame's own king stands on the sixth to ninth file, every board token of that frame is reflected left
+/// to right before its row is read, and the hands are left as they are.
+///
+/// A property of how the file is read and not of its dimensions, so it is a feature of its own (`sym_hm`) and
+/// not a row of [`DIMS`]. It is a constant: a build without it compiles none of the folding, and its code
+/// and speed are what they were.
+pub const HM: bool = cfg!(feature = "sym_hm");
 
 /// The width of one perspective's embedding.
 pub const DIM: usize = DIMS.dim;
@@ -197,11 +209,20 @@ const _: () = {
         "synn_token_256x2_32_32",
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
+        "synn_token_128x2_32_32_pair16_o1_hm",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(
         selected == 1,
         "select exactly one Manaka shape: they differ in their dimensions"
+    );
+};
+
+const _: () = {
+    // Only the token space has an own king whose file can be asked, and a table row that a fold can reflect.
+    assert!(
+        !HM || cfg!(feature = "sym_token"),
+        "hm folds the board squares of the token space only"
     );
 };
 

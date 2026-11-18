@@ -6,3 +6,38 @@ xtask = "run --quiet -p xtask --"
 # default. Applies to every profile.
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+# WebAssembly builds (`crates/attic-wasm`). A target-specific `rustflags` replaces
+# `[build]`'s, so `target-cpu=native`, which names the host and not wasm, stays out.
+# `simd128` is baseline in every runtime the packages target; the eval crate
+# selects its vector kernels by that target feature. The shadow stack is the
+# stack the host's calling thread uses (the single-threaded build runs searches
+# on it), and the search recurses to MAX_PLY, so it is far larger than wasm-ld's
+# default 1 MiB.
+#
+# `wasm32-wasip1-threads` gets shared memory and atomics from the target itself.
+# Its memory may grow to 4 GiB, the most wasm32 addresses; a host can create the
+# memory with a lower maximum.
+#
+# `wasm32-wasip1` has no threads, and a stable compiler cannot say so through
+# `cfg(target_feature = "atomics")`, so `attic_single_thread` does: the engine
+# crates run a `go` inline instead of spawning a thread for it.
+# Link the WASI reactor startup object from Rust's self-contained sysroot.
+# The host calls _initialize once before the first export that uses libc.
+[target.wasm32-wasip1-threads]
+rustflags = [
+    "-C", "target-feature=+simd128",
+    "-C", "link-arg=-zstack-size=8388608",
+    "-C", "link-arg=-l:crt1-reactor.o",
+    "-C", "link-arg=--entry=_initialize",
+    "-C", "link-arg=--max-memory=4294967296",
+]
+
+[target.wasm32-wasip1]
+rustflags = [
+    "-C", "target-feature=+simd128",
+    "-C", "link-arg=-zstack-size=8388608",
+    "-C", "link-arg=-l:crt1-reactor.o",
+    "-C", "link-arg=--entry=_initialize",
+    "--cfg", "attic_single_thread",
+]
