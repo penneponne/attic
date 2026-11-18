@@ -151,8 +151,8 @@ pub mod transformer_kernel {
         unsafe { avx512::add_sub_sub_features(out, weights, added, removed_a, removed_b) }
     }
 
-    /// `dst = src + sum(added) - sum(removed)`. Copy then apply; the one-pass
-    /// AVX2 form is not ported to 512 bits.
+    /// `dst = src + sum(added) - sum(removed)` in one pass over the accumulator
+    /// half: the child-from-parent derive, without the copy.
     #[inline]
     pub fn derive_features(
         dst: &mut [i16],
@@ -161,9 +161,8 @@ pub mod transformer_kernel {
         added: &[FeatureIndex],
         removed: &[FeatureIndex],
     ) {
-        dst.copy_from_slice(src);
-        sub_features(dst, weights, removed);
-        add_features(dst, weights, added);
+        // SAFETY: see `add_features`.
+        unsafe { avx512::derive_features(dst, src, weights, added, removed) }
     }
 }
 
