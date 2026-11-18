@@ -83,3 +83,11 @@ pub(super) const EXPORTED: Exported = Exported {
     rest: "FoldedTokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)]))))))",
     hash: 0x0af15d6f,
 };
+
+/// From the file `export-nnue` wrote for a net at this shape (tideborn `feat/hm-pair-plain` d7bf3a4d,
+/// 2026-11-18): the pair16 o1 string with the pair table eight wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair8_o1")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-272](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[8](PairSum[8](InputSlice[8(128:136)]))))))",
+    hash: 0x185437be,
+};

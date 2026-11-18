@@ -77,11 +77,15 @@ pub(super) fn synthetic() -> &'static SymNetwork {
 struct Gain;
 
 impl Gain {
-    const W1: f32 = 0.3;
+    /// A pair table half as wide leaves the first layer with a sixth fewer inputs and less spread from
+    /// the table it keeps, so its rows want more weight to reach the upper rail.
+    const W1: f32 = if super::super::PAIR == 8 { 0.6 } else { 0.3 };
     /// The second layer reads at most `HIDDEN` activations in `[0, 1]`, where the
     /// first reads hundreds, so it wants more weight to reach a rail.
     const W2: f32 = 2.0;
-    const PAIR: f32 = 0.1;
+    /// Eight channels sum fewer rows' worth of spread than sixteen do, so a table that narrow wants a
+    /// larger gain to reach the upper rail on the opening's thirty plies.
+    const PAIR: f32 = if super::super::PAIR <= 8 { 0.2 } else { 0.1 };
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
 
