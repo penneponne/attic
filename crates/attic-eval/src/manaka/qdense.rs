@@ -118,11 +118,11 @@ impl QuantW1 {
     /// clip: the bound in [`row_levels`] is for that range. This is the head's first
     /// layer, `HIDDEN` rows over `FEATURE_LEN` columns.
     pub fn layer_clip(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
-        // The one buffer a layer needs, on the stack and exactly as wide as the
-        // layer: a `Vec` would be an allocation per node, and a buffer sized for the
-        // widest shape would be cleared in full on every call.
-        let mut x = [0i16; INPUT_STRIDE];
-        self.layer_clip_with(input, bias, out, &mut x);
+        // The one buffer a layer needs, exactly as wide as the layer and kept from
+        // one call to the next: a `Vec` would be an allocation per node, and a fresh
+        // array a clear per node. `quantize_input` writes every entry, the padding
+        // included, so what the last call left is never read.
+        INPUT.with_borrow_mut(|x| self.layer_clip_with(input, bias, out, x));
     }
 
     /// [`QuantW1::layer_clip`] with the buffer for the quantised input supplied, which
@@ -187,6 +187,12 @@ impl QuantW1 {
 /// takes and what a row of [`QuantW1`] is stored as. The layer is always the head's
 /// `HIDDEN` rows over `FEATURE_LEN` columns.
 const INPUT_STRIDE: usize = super::FEATURE_LEN.next_multiple_of(LANES);
+
+thread_local! {
+    /// [`QuantW1::layer_clip`]'s quantised input, one buffer a thread.
+    static INPUT: std::cell::RefCell<[i16; INPUT_STRIDE]> =
+        const { std::cell::RefCell::new([0; INPUT_STRIDE]) };
+}
 
 /// The input as `round(x · INPUT_LEVELS)`, with the padding zeroed.
 ///

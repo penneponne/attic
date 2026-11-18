@@ -107,7 +107,7 @@ fn the_row_totals_are_the_plain_ones_to_the_last_bit() {
                 others.push(other);
             }
         }
-        let want = row_totals_scalar(table, token, &others);
+        let want = row_totals_scalar(table.halves(), token, &others);
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -115,7 +115,8 @@ fn the_row_totals_are_the_plain_ones_to_the_last_bit() {
         ))]
         {
             // SAFETY: the `cfg` is the build enabling AVX2 and F16C.
-            let got = unsafe { super::super::pair::row_totals_avx2(table, token, &others) };
+            let got =
+                unsafe { super::super::pair::row_totals_avx2(table.halves(), token, &others) };
             for (channel, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert_eq!(
                     g.to_bits(),

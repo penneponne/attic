@@ -36,7 +36,7 @@ struct Met {
 fn a_derive_is_a_refresh_when_the_kings_walk_across_the_line() {
     const { assert!(HM, "this test is for the hm build") };
     let net = synthetic();
-    let mut cache = FinnyCache;
+    let mut cache = FinnyCache::default();
     let mut met = Met::default();
     for seed in 1..=24 {
         let game = king_walk_game(seed, 140, 0.30, 0.25);
@@ -106,7 +106,18 @@ fn a_derive_is_a_refresh_when_the_kings_walk_across_the_line() {
             acc.clone_from(&derived);
         }
     }
-    println!("{met:?}");
+    println!(
+        "{met:?}; crossings from a kept state {}, from nothing {}",
+        cache.from_entry, cache.from_nothing
+    );
+    // The crossings above were mostly built from the state the frame last had in the fold it entered, and
+    // were each held to a refresh: the cache was used, and what it gave is the accumulator.
+    assert!(
+        cache.from_entry > cache.from_nothing,
+        "most crossings start from a kept state: {} from one, {} from nothing",
+        cache.from_entry,
+        cache.from_nothing
+    );
     assert!(
         met.folds.iter().flatten().all(|&n| n > 0),
         "all four combinations of the frames' folds are met: {met:?}"
@@ -180,4 +191,110 @@ fn a_folded_frame_is_not_the_unfolded_one_and_an_unfolded_one_is() {
         }
     }
     assert!(moved > 50 && same > 50, "moved {moved}, same {same}");
+}
+
+/// What a touch adds to the pair sums, in every fold of the two frames and with either frame or both
+/// updated, is each frame's own read of the first table to the last bit: the rows of its tokens as it
+/// reflects them, in the order given, and that frame's half of them. Frames folded differently read the
+/// second table and not two rows a pair, so this is what holds that table to the first. At every
+/// precision the table can be held in, since the second table is rounded by itself.
+#[test]
+fn a_touch_in_any_fold_adds_what_each_frame_reads_alone() {
+    use super::super::pair::{row_totals, touch_pairs_hm};
+    use super::super::{PAIR, PairPrecision};
+    use crate::tokens::{FeatureIndex, mirror_row};
+
+    const { assert!(HM, "this test is for the hm build") };
+    for precision in [PairPrecision::F16, PairPrecision::I8, PairPrecision::I8Row] {
+        let mut net = synthetic().replicate();
+        net.use_pair_precision(precision);
+        let mut state = 11u64;
+        let mut pick = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize % super::super::TOKENS) as FeatureIndex
+        };
+        for count in 0..40 {
+            let token = pick();
+            let mut others = Vec::new();
+            while others.len() < count {
+                let other = pick();
+                if other != token && !others.contains(&other) {
+                    others.push(other);
+                }
+            }
+            let reflected: Vec<FeatureIndex> = others.iter().map(|&o| mirror_row(o)).collect();
+            for folded in [[false, false], [true, false], [false, true], [true, true]] {
+                for update in [[true, true], [true, false], [false, true]] {
+                    let mut sums = [vec![0.0; PAIR], vec![0.0; PAIR]];
+                    touch_pairs_hm(&mut sums, &net, token, &others, 1.0, folded, update);
+                    for frame in 0..2 {
+                        let totals = if folded[frame] {
+                            row_totals(net.pair.cells(), mirror_row(token), &reflected)
+                        } else {
+                            row_totals(net.pair.cells(), token, &others)
+                        };
+                        for channel in 0..PAIR {
+                            let want = if update[frame] {
+                                f64::from(totals[frame * PAIR + channel])
+                            } else {
+                                0.0
+                            };
+                            assert_eq!(
+                                sums[frame][channel].to_bits(),
+                                want.to_bits(),
+                                "{precision:?}, {count} others, folds {folded:?}, updates {update:?}, \
+                                 frame {frame}, channel {channel}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A kept state is a sum over one network's table, so a cache handed a derive of another network forgets what it
+/// held, and the crossing is summed from nothing: two networks with the same shape are not each other's sums.
+#[test]
+fn a_cache_forgets_its_states_for_another_network() {
+    const { assert!(HM, "this test is for the hm build") };
+    let first = synthetic();
+    let second = synthetic().replicate();
+    let mut cache = FinnyCache::default();
+    // Walk one game with the first network until a crossing has come from a kept state.
+    let game = king_walk_game(3, 140, 0.30, 0.25);
+    let walk = |net: &super::super::SymNetwork,
+                cache: &mut FinnyCache,
+                until: &dyn Fn(&FinnyCache) -> bool| {
+        let mut acc = Accumulator::new();
+        acc.refresh(net, &game[0].0);
+        let mut derived = Accumulator::new();
+        for (before, mv) in &game {
+            let delta = MoveDelta::from_move(before, *mv);
+            let mut after = before.clone();
+            let _ = after.do_move(*mv);
+            Accumulator::derive_into_cached(&acc, &mut derived, net, &after, &delta, cache);
+            acc.clone_from(&derived);
+            if until(cache) {
+                return;
+            }
+        }
+        panic!(
+            "the game ended before {:?}",
+            (cache.from_entry, cache.from_nothing)
+        );
+    };
+    walk(first, &mut cache, &|c| c.from_entry > 0);
+    // The first crossing with the second network is summed from nothing, whatever the cache held.
+    let (entry, nothing) = (cache.from_entry, cache.from_nothing);
+    walk(&second, &mut cache, &|c| {
+        c.from_entry + c.from_nothing > entry + nothing
+    });
+    assert_eq!(
+        (cache.from_entry, cache.from_nothing),
+        (entry, nothing + 1),
+        "the first crossing under another network starts from nothing"
+    );
 }

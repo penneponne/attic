@@ -46,6 +46,12 @@ const ROWS: usize = 8;
 /// input takes and what a row of [`QuantW1I8`] is stored as.
 const INPUT_STRIDE: usize = super::FEATURE_LEN.next_multiple_of(LANES);
 
+thread_local! {
+    /// [`QuantW1I8::layer_clip`]'s quantised input, one buffer a thread.
+    static INPUT: std::cell::RefCell<[u8; INPUT_STRIDE]> =
+        const { std::cell::RefCell::new([0; INPUT_STRIDE]) };
+}
+
 /// The first layer's weights as `i8`, one scale per row.
 #[derive(Clone, Debug)]
 pub struct QuantW1I8 {
@@ -93,9 +99,9 @@ impl QuantW1I8 {
     /// clip. This is the head's first layer, `HIDDEN` rows over `FEATURE_LEN`
     /// columns.
     pub fn layer_clip(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
-        // On the stack and exactly as wide as the layer, as the `i16` layer's is.
-        let mut x = [0u8; INPUT_STRIDE];
-        self.layer_clip_with(input, bias, out, &mut x);
+        // Kept from one call to the next and exactly as wide as the layer, as the
+        // `i16` layer's is; `quantize_input` writes every entry, the padding included.
+        INPUT.with_borrow_mut(|x| self.layer_clip_with(input, bias, out, x));
     }
 
     /// [`QuantW1I8::layer_clip`] with the buffer for the quantised input supplied,
