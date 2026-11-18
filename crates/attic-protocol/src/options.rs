@@ -87,12 +87,27 @@ impl std::fmt::Display for OptionError {
 
 /// The reference's `MaxThreads`: `max(1024, 4 · cores)`, the upper bound of the
 /// `Threads` spin option.
+#[cfg(not(attic_single_thread))]
 fn max_threads() -> i64 {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1) as i64;
     std::cmp::max(1024, 4 * cores)
 }
+
+/// A single-threaded wasm build runs every search on its one thread.
+#[cfg(attic_single_thread)]
+fn max_threads() -> i64 {
+    1
+}
+
+/// The `Threads` default: the reference's 4, or 1 on a wasm build, whose host
+/// asks for the threads it wants and would otherwise pay for three workers it
+/// is about to tear down again.
+#[cfg(not(target_family = "wasm"))]
+const DEFAULT_THREADS: i64 = 4;
+#[cfg(target_family = "wasm")]
+const DEFAULT_THREADS: i64 = 1;
 
 // The declarations below follow the reference's own (yaneuraou-engine, NNUE
 // eval, 64-bit, non-Stockfish):
@@ -146,13 +161,21 @@ fn declarations(book_options: BookOptionsVersion) -> Vec<OptionDecl> {
     let mut decls = vec![
         OptionDecl::Spin {
             name: "USI_Hash",
-            default: 1024,
+            default: if cfg!(target_family = "wasm") {
+                16
+            } else {
+                1024
+            },
             min: 1,
-            max: 33_554_432,
+            max: if cfg!(target_family = "wasm") {
+                1024
+            } else {
+                33_554_432
+            },
         },
         OptionDecl::Spin {
             name: "Threads",
-            default: 4,
+            default: DEFAULT_THREADS,
             min: 1,
             max: max_threads(),
         },

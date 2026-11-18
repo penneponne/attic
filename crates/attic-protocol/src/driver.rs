@@ -119,12 +119,29 @@ struct LoadedBook {
     ignore_book_ply: bool,
 }
 
+/// What `ActiveSearch` joins: the search worker's thread.
+#[cfg(not(attic_single_thread))]
+type SearchJoin = JoinHandle<SearchState>;
+
+/// A single-threaded wasm build has no thread to spawn, so `go` runs the whole
+/// search inside the command that issued it and keeps the finished state here;
+/// `join` then hands it back at once.
+#[cfg(attic_single_thread)]
+struct SearchJoin(SearchState);
+
+#[cfg(attic_single_thread)]
+impl SearchJoin {
+    fn join(self) -> thread::Result<SearchState> {
+        Ok(self.0)
+    }
+}
+
 /// A search worker running on its own thread. The main thread keeps reading USI
 /// lines while this runs; `stop` / `quit` set [`Self::stop`], which the search
 /// polls at the reference `check_time` granularity. The worker emits its own
 /// `info` / `bestmove`.
 struct ActiveSearch {
-    handle: JoinHandle<SearchState>,
+    handle: SearchJoin,
     stop: Arc<AtomicBool>,
     /// The shared `go ponder` state. A plain `ponderhit` clears it, turning the
     /// pondering search into a normal time-managed one; when `None`, a stray
@@ -156,6 +173,38 @@ struct SearchState {
     time_state: Option<(Value, Value, Option<f64>)>,
     /// The main worker's `callsCnt` down-counter as the search left it.
     calls_cnt: i32,
+}
+
+/// The command table, shared by [`UsiDriver::run`] and the line-at-a-time entry
+/// a single-threaded wasm build uses instead. A macro, not a method both call,
+/// so that `run`'s machine code is exactly what it was before the second entry
+/// point existed. `$on_quit` is the statement that leaves the caller after a
+/// `quit`.
+macro_rules! dispatch_command {
+    ($driver:ident, $command:expr, $on_quit:stmt) => {
+        match $command {
+            Command::Usi => $driver.handle_usi()?,
+            Command::IsReady => $driver.handle_isready()?,
+            Command::SetOption { name, value } => $driver.handle_setoption(&name, &value)?,
+            Command::UsiNewGame => $driver.handle_usinewgame(),
+            Command::Position { sfen, moves } => $driver.handle_position(sfen, &moves)?,
+            Command::Go(limits) => $driver.handle_go(limits, None)?,
+            Command::Stop => $driver.handle_stop(),
+            Command::GameOver => $driver.handle_gameover(),
+            Command::PonderHit => $driver.handle_ponderhit()?,
+            Command::Bench(tokens) => $driver.handle_bench(&tokens)?,
+            Command::ClipStats(tokens) => $driver.handle_clipstats(&tokens)?,
+            Command::CriticalError { command, reason } => {
+                $driver.handle_critical_error(&command, &reason)?
+            }
+            Command::Quit => {
+                $driver.finish_search_join();
+                $on_quit
+            }
+            Command::Unknown(line) => $driver.handle_unknown(&line)?,
+            Command::TooLong => $driver.handle_too_long()?,
+        }
+    };
 }
 
 pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
@@ -357,29 +406,18 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
                 self.finish_search_join();
                 return Ok(());
             }
-            match parse_line(&buf) {
-                Command::Usi => self.handle_usi()?,
-                Command::IsReady => self.handle_isready()?,
-                Command::SetOption { name, value } => self.handle_setoption(&name, &value)?,
-                Command::UsiNewGame => self.handle_usinewgame(),
-                Command::Position { sfen, moves } => self.handle_position(sfen, &moves)?,
-                Command::Go(limits) => self.handle_go(limits, None)?,
-                Command::Stop => self.handle_stop(),
-                Command::GameOver => self.handle_gameover(),
-                Command::PonderHit => self.handle_ponderhit()?,
-                Command::Bench(tokens) => self.handle_bench(&tokens)?,
-                Command::ClipStats(tokens) => self.handle_clipstats(&tokens)?,
-                Command::CriticalError { command, reason } => {
-                    self.handle_critical_error(&command, &reason)?
-                }
-                Command::Quit => {
-                    self.finish_search_join();
-                    return Ok(());
-                }
-                Command::Unknown(line) => self.handle_unknown(&line)?,
-                Command::TooLong => self.handle_too_long()?,
-            }
+            dispatch_command!(self, parse_line(&buf), return Ok(()));
         }
+    }
+
+    /// Run one command line and report whether it was `quit`.
+    ///
+    /// A single-threaded wasm build has no thread to block on a reader, so its
+    /// host feeds the driver one line at a time instead of calling [`Self::run`].
+    #[cfg(attic_single_thread)]
+    pub fn run_line(&mut self, line: &str) -> io::Result<bool> {
+        dispatch_command!(self, parse_line(line), return Ok(true));
+        Ok(false)
     }
 
     /// Lock the shared output sink, recovering from a poisoned mutex: a worker
@@ -1037,6 +1075,15 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     fn handle_go(&mut self, limits: GoLimits, start_time: Option<Instant>) -> io::Result<()> {
         self.finish_search_join();
 
+        // `go infinite` and `go ponder` hold their reply until a `stop` or
+        // `ponderhit` arrives, which a build that runs the search inside the
+        // command can never deliver.
+        #[cfg(attic_single_thread)]
+        if limits.infinite || limits.ponder {
+            self.info_string("go infinite and go ponder need threads; this build has none")?;
+            return self.bestmove("resign");
+        }
+
         self.last_go = Some(limits.clone());
 
         // Stochastic_Ponder ponders one move earlier than the retained
@@ -1057,14 +1104,18 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         let stop_for_active = Arc::clone(&job.stop);
         let ponder_for_active = job.ponder.as_ref().map(Arc::clone);
         let suppress_for_active = Arc::clone(&job.suppress_bestmove);
-        let handle = std::thread::spawn(move || {
+        let search = move || {
             let outcome = run_coordinated(job);
             SearchState {
                 histories: outcome.histories,
                 time_state: outcome.time_state,
                 calls_cnt: outcome.calls_cnt,
             }
-        });
+        };
+        #[cfg(not(attic_single_thread))]
+        let handle = std::thread::spawn(search);
+        #[cfg(attic_single_thread)]
+        let handle = SearchJoin(search());
 
         self.search = Some(ActiveSearch {
             handle,
@@ -1783,6 +1834,7 @@ struct KeepAlive {
 #[derive(Default)]
 struct KeepAliveFlags {
     /// Set by the helper once it runs (`thread_started`).
+    #[cfg_attr(attic_single_thread, allow(dead_code))]
     started: bool,
     /// Set on drop to stop the helper (`thread_end`).
     end: bool,
@@ -1795,40 +1847,48 @@ impl KeepAlive {
     /// for the same reason.
     fn spawn<W: Write + Send + 'static>(writer: Arc<Mutex<W>>, interval: Duration) -> Self {
         let shared = Arc::new((Mutex::new(KeepAliveFlags::default()), Condvar::new()));
-        let handle = thread::spawn({
-            let shared = Arc::clone(&shared);
-            move || {
-                let (lock, cv) = &*shared;
-                let mut flags = lock.lock().unwrap_or_else(|e| e.into_inner());
-                flags.started = true;
-                cv.notify_all();
-                loop {
-                    flags = cv
-                        .wait_timeout_while(flags, interval, |f| !f.end)
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
-                    if flags.end {
-                        break;
+        #[cfg(not(attic_single_thread))]
+        let handle = {
+            let handle = thread::spawn({
+                let shared = Arc::clone(&shared);
+                move || {
+                    let (lock, cv) = &*shared;
+                    let mut flags = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    flags.started = true;
+                    cv.notify_all();
+                    loop {
+                        flags = cv
+                            .wait_timeout_while(flags, interval, |f| !f.end)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0;
+                        if flags.end {
+                            break;
+                        }
+                        // A bare newline with no `info string` prefix, holding the
+                        // output lock so it cannot interleave mid-line with the
+                        // heavy work's own output.
+                        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = Formatter::new(&mut *guard).raw_line("");
                     }
-                    // A bare newline with no `info string` prefix, holding the
-                    // output lock so it cannot interleave mid-line with the
-                    // heavy work's own output.
-                    let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = Formatter::new(&mut *guard).raw_line("");
                 }
-            }
-        });
-        let (lock, cv) = &*shared;
-        drop(
-            cv.wait_while(lock.lock().unwrap_or_else(|e| e.into_inner()), |f| {
-                !f.started
-            })
-            .unwrap_or_else(|e| e.into_inner()),
-        );
-        Self {
-            shared,
-            handle: Some(handle),
-        }
+            });
+            let (lock, cv) = &*shared;
+            drop(
+                cv.wait_while(lock.lock().unwrap_or_else(|e| e.into_inner()), |f| {
+                    !f.started
+                })
+                .unwrap_or_else(|e| e.into_inner()),
+            );
+            Some(handle)
+        };
+        // No thread to run a keep-alive on, and nothing to keep alive: the host
+        // sees every line the moment it is written.
+        #[cfg(attic_single_thread)]
+        let handle = {
+            let _ = (&writer, interval);
+            None
+        };
+        Self { shared, handle }
     }
 }
 
@@ -2135,6 +2195,13 @@ impl ThreadPool {
     /// any running search first, so every helper is parked when this runs.
     fn set_with_binding(&mut self, size: usize, plan: Option<Arc<NumaBindPlan>>) {
         self.shutdown();
+        // A single-threaded wasm build has no helper threads.
+        #[cfg(attic_single_thread)]
+        let size = {
+            let _ = size;
+            1
+        };
+        #[cfg(not(attic_single_thread))]
         let size = size.max(1);
         for worker_id in 1..size {
             let slot = Arc::new(HelperSlot::new());

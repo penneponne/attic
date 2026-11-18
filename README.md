@@ -24,6 +24,44 @@ USI プロトコルを標準入出力で話します。引数なしで `attic` �
 | `quit`                                                                         | 終了する                                                                                                                      |
 | `bench [ttSizeMB] [threads] [limit] [default\|current\|<fenFile>] [limitType]` | 固定条件で NPS を計測する。引数はすべて省略でき、既定値は置換表 1024 MB、1 スレッド、`limit` 15000、`limitType` は `movetime` |
 
+## WebAssembly
+
+`attic-wasm` は、JavaScript から USI コマンドを送って使う WASI モジュールです。
+`wasm32-wasip1` 版は呼び出し元で探索を完了します。探索中に `stop` を送れないため、`go depth` や `go nodes` のように終了条件を指定してください。
+`wasm32-wasip1-threads` 版は Worker で動き、`go infinite`、`stop`、`Threads` を使えます。ブラウザーでこの版を使うには、クロスオリジン分離を有効にして `SharedArrayBuffer` を利用できるようにしてください。両版とも WebAssembly SIMD に対応した環境が必要です。
+
+以下は評価ファイル不要の `hce_material_17` を使うビルド例です。
+
+```sh
+rustup target add wasm32-wasip1 wasm32-wasip1-threads
+cargo build --locked --release -p attic-wasm --target wasm32-wasip1 --features hce_material_17
+cargo build --locked --release -p attic-wasm --target wasm32-wasip1-threads --features hce_material_17
+npm --prefix wasm/core ci
+npm --prefix wasm/core run build
+```
+
+`wasm/core/dist/index.js` の `createEngine` に、各ターゲットの `release/attic_wasm.wasm` を読み込んだバイト列を渡します。単一スレッド版にはコンパイル済みの `WebAssembly.Module` も渡せます。
+NNUE などを使う場合は評価関数に対応する Cargo feature を選び、`files: { "/eval/nn.bin": weights }` を渡します。`weights` は評価ファイルのバイト列です。
+
+```js
+import { readFile } from "node:fs/promises";
+import { createEngine } from "./wasm/core/dist/index.js";
+
+const wasm = await readFile("./target/wasm32-wasip1/release/attic_wasm.wasm");
+const engine = await createEngine({ wasm, print: console.log });
+engine.addLineListener((line) => {
+  if (line === "readyok") {
+    engine.send("position startpos");
+    engine.send("go depth 3");
+  }
+});
+try {
+  engine.send("isready");
+} finally {
+  await engine.dispose();
+}
+```
+
 ## YaneuraOu との互換性
 
 同じ局面・同じ条件で探索したときに、各反復の深さ・評価値・ノード数・読み筋と `bestmove` が YaneuraOu と行単位で一致することを目指しています。確認できた範囲は次のとおりで、これ以外は確認していません。

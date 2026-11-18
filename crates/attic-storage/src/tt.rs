@@ -558,6 +558,15 @@ impl TranspositionTable {
         }
         let thread_count = thread_count.max(1);
         let bytes = self.table_bytes();
+        // A single-threaded wasm build has no thread to spawn, so it clears each
+        // range in turn on the calling thread.
+        #[cfg(attic_single_thread)]
+        for i in 0..thread_count {
+            on_thread_start(i);
+            // SAFETY: as for the threaded clear below, with no other thread at all.
+            unsafe { bytes.zero_part(i, thread_count) };
+        }
+        #[cfg(not(attic_single_thread))]
         std::thread::scope(|s| {
             for i in 0..thread_count {
                 let bytes = &bytes;
