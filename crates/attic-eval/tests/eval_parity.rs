@@ -5,7 +5,9 @@
 //! the test prints a notice and passes and the default `cargo test` run stays
 //! green everywhere.
 
-#![cfg(feature = "sfnn")]
+// Sirius's network has fixtures of its own (`sirius_parity.rs`); these json files were taken
+// from the other SFNN networks.
+#![cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 
 use std::path::{Path, PathBuf};
 

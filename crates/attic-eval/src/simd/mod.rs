@@ -41,14 +41,18 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_post_ft;
 
-// Excluded under `sfnn_halfkahm2_2304_15_64_progress8ek` and the two 1024 shapes
-// (`..._progress8kpabs`, `..._progress8ek`): the post-FT chain there ends in
+// Excluded under `sfnn_halfkahm2_2304_15_64_progress8ek`, the two 1024 shapes
+// (`..._progress8kpabs`, `..._progress8ek`) and Sirius's threat shape: the post-FT chain there ends in
 // `affine_padded32` helpers that take a fixed `[u8; 32]`, and fc_1's output is 64
 // in those shapes. Upstream C++ takes a separate `kUsePackedTail` path for
 // exactly this case (`AVX512 && kHidden2Dims == 64`), which has no port here yet.
 // The target for the 2304 shape is Zen2, which has no AVX-512 at all, so nothing
 // is lost by not compiling it — write the packed-tail kernels before running
 // either 64-wide shape on an AVX-512 host.
+//
+// The threat shape on an AVX-512 host therefore runs the AVX2 kernels above, the same ones
+// an AVX2-only host runs: the AVX-512 arms are selected by the 1536 feature as well as by
+// the target features, and a build for any other shape falls through to the AVX2 arm.
 #[allow(dead_code)]
 #[cfg(all(target_arch = "x86_64", feature = "sfnn_halfkahm2_1536_15_32_k3k3"))]
 pub mod avx512;
@@ -242,6 +246,15 @@ pub mod transformer_kernel {
         // SAFETY: see `add_features`.
         unsafe { avx2::derive_features(dst, src, weights, added, removed) }
     }
+
+    /// Take the `removed` threat rows off `out` and put the `added` ones on (the threat
+    /// shape's int8 rows, widened and added unscaled).
+    #[cfg(feature = "sfnn_threat")]
+    #[inline]
+    pub fn apply_threat_rows(out: &mut [i16], weights: &[i8], removed: &[u32], added: &[u32]) {
+        // SAFETY: see `add_features`.
+        unsafe { avx2::apply_threat_rows(out, weights, removed, added) }
+    }
 }
 
 /// The portable arm: neither AVX-512 nor AVX2.
@@ -253,6 +266,8 @@ pub mod transformer_kernel {
     )
 )))]
 pub mod transformer_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::scalar::apply_threat_rows;
     pub use super::scalar::{
         add_features, add_sub_features, add_sub_sub_features, derive_features, sub_features,
     };
@@ -437,6 +452,15 @@ pub mod post_ft_kernel {
         unsafe { super::avx2_post_ft::ewm_one_perspective(half, out) }
     }
 
+    /// Pairwise element-wise multiply for one perspective of the threat shape, whose
+    /// accumulator is at the scale the file holds: clamp to 127, multiply, shift by 7.
+    #[cfg(feature = "sfnn_threat")]
+    #[inline]
+    pub fn ewm_one_perspective_file_scale(half: &[i16], out: &mut [u8]) {
+        // SAFETY: see `ewm_one_perspective`.
+        unsafe { super::avx2_post_ft::ewm_one_perspective_file_scale(half, out) }
+    }
+
     /// Clipped ReLU.
     #[inline]
     pub fn clipped_relu(input: &[i32], output: &mut [u8]) {
@@ -454,6 +478,8 @@ pub mod post_ft_kernel {
     )
 )))]
 pub mod post_ft_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::scalar_post_ft::ewm_one_perspective_file_scale;
     pub use super::scalar_post_ft::{
         affine, affine_u7, affine_u7_wide, clipped_relu, ewm_one_perspective, sqr_clipped_relu,
     };
