@@ -36,10 +36,10 @@ env:
 # The network shape is a build-time feature and exactly one must be selected
 # (`attic-eval` refuses to compile with none or two), so `--all-features` can
 # neither build nor test anything. Each job below runs once per shape instead.
-# `args` is what follows `cargo <verb>` to pick it; the thirteenth entry is the
+# `args` is what follows `cargo <verb>` to pick it; the fourteenth entry is the
 # build that must match YaneuraOu node for node (`ref_check_time` moves the
 # time checks to where the reference's are), which turns off the defaults.
-# The list is written out in each job on purpose: it is the same thirteen
+# The list is written out in each job on purpose: it is the same fourteen
 # entries three times, and kept that way rather than behind a YAML anchor so that
 # no workflow parser has to support one for CI to start at all.
 #
@@ -87,6 +87,8 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: sfnn-threat
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp
             args: --features nnue_kp_256x2_32_32
           - name: nnue-halfkp
@@ -199,6 +201,8 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: sfnn-threat
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp
             args: --features nnue_kp_256x2_32_32
           - name: nnue-halfkp
@@ -241,6 +245,8 @@ jobs:
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
           - name: sfnn-2304
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
+          - name: sfnn-threat
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
           - name: nnue-kp
             args: --features nnue_kp_256x2_32_32
           - name: nnue-halfkp

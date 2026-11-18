@@ -86,6 +86,28 @@ pub fn derive_features(
     add_features(dst, weights, added);
 }
 
+/// Take the `removed` threat rows off `out` and put the `added` ones on: each row is
+/// `HIDDEN_SIZE` signed bytes, sign-extended and added unscaled, wrapping in `i16`.
+///
+/// The threat shape's counterpart of the feature-column kernels above, with the rows `i8`
+/// where the columns are `i16`. A refresh is this with nothing removed.
+#[cfg(feature = "sfnn_threat")]
+pub fn apply_threat_rows(out: &mut [i16], weights: &[i8], removed: &[u32], added: &[u32]) {
+    debug_assert_eq!(out.len(), HIDDEN_SIZE);
+    for &row in removed {
+        let base = row as usize * HIDDEN_SIZE;
+        for (o, &w) in out.iter_mut().zip(&weights[base..base + HIDDEN_SIZE]) {
+            *o = o.wrapping_sub(i16::from(w));
+        }
+    }
+    for &row in added {
+        let base = row as usize * HIDDEN_SIZE;
+        for (o, &w) in out.iter_mut().zip(&weights[base..base + HIDDEN_SIZE]) {
+            *o = o.wrapping_add(i16::from(w));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

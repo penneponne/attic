@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use attic_search::FV_SCALE_DEFAULT;
+
 use crate::option_profile::BookOptionsVersion;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,10 +167,11 @@ fn declarations(book_options: BookOptionsVersion) -> Vec<OptionDecl> {
             default: "eval",
         },
         // NNUE fixed-point output scale. Suisho-family nets recommend 24 or
-        // more.
+        // more. The default is the evaluator's own: 16 for every shape but
+        // Sirius's, whose network is divided by 26.
         OptionDecl::Spin {
             name: "FV_SCALE",
-            default: 16,
+            default: FV_SCALE_DEFAULT as i64,
             min: 1,
             max: 128,
         },
@@ -700,7 +703,10 @@ mod tests {
             s.get("EvalDir"),
             Some(&OptionValue::String("eval".to_string()))
         );
-        assert_eq!(s.get("FV_SCALE"), Some(&OptionValue::Spin(16)));
+        assert_eq!(
+            s.get("FV_SCALE"),
+            Some(&OptionValue::Spin(FV_SCALE_DEFAULT as i64))
+        );
         assert_eq!(
             s.get("BookFile"),
             Some(&OptionValue::Combo("no_book".to_string()))
@@ -991,7 +997,10 @@ mod tests {
     #[test]
     fn value_text_renders_each_type() {
         let s = OptionStore::new();
-        assert_eq!(s.value_text("FV_SCALE"), Some("16"));
+        assert_eq!(
+            s.value_text("FV_SCALE"),
+            Some(FV_SCALE_DEFAULT.to_string().as_str())
+        );
         assert_eq!(s.value_text("USI_Ponder"), Some("false"));
         assert_eq!(s.value_text("EvalDir"), Some("eval"));
         assert_eq!(s.value_text("EnteringKingRule"), Some("CSARule27"));

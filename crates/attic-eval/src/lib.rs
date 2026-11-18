@@ -21,6 +21,13 @@ mod scale;
 mod tokens;
 mod types;
 
+// Sirius's network: the threat features and the game-phase stack choice. Public because the
+// tests outside the crate check the lists and the choice against their own oracles.
+#[cfg(feature = "sfnn_threat")]
+pub mod gp;
+#[cfg(feature = "sfnn_threat")]
+pub mod threat;
+
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 mod finny;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
@@ -92,6 +99,8 @@ pub use features::{MoveDelta, PerspectiveDelta};
 pub use finny::FinnyCache;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 pub use loader::{load_network, load_network_with_dims, load_network_with_warnings};
+#[cfg(feature = "sfnn_threat")]
+pub use network::SCORE_LIMIT;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 pub use network::{evaluate, evaluate_with, layer_stack_index};
 #[cfg(not(any(feature = "sym", feature = "hce")))]
