@@ -20,6 +20,14 @@
 //! too reads one row a pair for both frames, where the one table would have it read two and use half of
 //! each.
 //!
+//! Held as halves, an `hm` table keeps neither of those for the search to read. It keeps [`PairTable::quad`]
+//! instead: for each pair `{a, b}` as the black frame numbers it, unreflected, a block of two rows, the main
+//! table's row `{a, b}` and then its row `{m(a), m(b)}`. Every fold of the two frames reads a pair's black
+//! channels from one of the block's rows and its white channels from one of them, so a pair is read at the same
+//! 128 bytes whichever way the kings stand, where the two tables put the four places a pair is read in four
+//! parts of 352 MB, and a subtree below a king crossing the fifth file read rows the search had not been
+//! reading. The tokens are not reflected to find a row either.
+//!
 //! The table can also be held as bytes, half the size again: the reads of a derive
 //! are rows picked at random from a table of 88 to 352 MB, so the bytes a row takes
 //! are what the memory is asked for. [`PairPrecision`] names the two ways to round a
@@ -98,6 +106,12 @@ pub struct PairTable {
     /// `hm` only, and empty otherwise: the rows a position reads when one frame is folded and the other is
     /// not, in the same form as `cells`. See the module head.
     mixed: Cells,
+    /// `hm` held as halves only, and empty otherwise: `[PAIR_ROWS][2][ROW]` halves from `quad_at`, the main table's
+    /// row `{a, b}` and its row `{m(a), m(b)}` for each pair `{a, b}`. See the module head. The allocation is one
+    /// block longer than the table so that the table can start on a 128-byte boundary, where a block is two whole
+    /// cache lines.
+    quad: Aligned64<u16>,
+    quad_at: usize,
 }
 
 impl PairTable {
@@ -106,6 +120,8 @@ impl PairTable {
         PairTable {
             cells: Cells::Halves(Aligned64::zeroed(0)),
             mixed: Cells::Halves(Aligned64::zeroed(0)),
+            quad: Aligned64::zeroed(0),
+            quad_at: 0,
         }
     }
 
@@ -138,14 +154,18 @@ impl PairTable {
                 row += 1;
             }
         }
-        let mixed = if HM {
-            mixed_halves(&halves)
+        // The second table is built only if the table is rounded to bytes (`use_precision`); held as halves, an
+        // hm table is read through the blocks.
+        let (quad, quad_at) = if HM {
+            quad_halves(&halves)
         } else {
-            Aligned64::zeroed(0)
+            (Aligned64::zeroed(0), 0)
         };
         PairTable {
             cells: Cells::Halves(halves),
-            mixed: Cells::Halves(mixed),
+            mixed: Cells::Halves(Aligned64::zeroed(0)),
+            quad,
+            quad_at,
         }
     }
 
@@ -173,6 +193,16 @@ impl PairTable {
     #[cfg(feature = "sym_token")]
     pub(super) fn mixed_cells(&self) -> &Cells {
         &self.mixed
+    }
+
+    /// `hm`'s blocks, `[PAIR_ROWS][2][ROW]` halves, or `None` when the table has none (not `hm`, or rounded to
+    /// bytes, which reads [`cells`](Self::cells) and [`mixed_cells`](Self::mixed_cells)).
+    #[cfg(feature = "sym_token")]
+    pub(super) fn quad(&self) -> Option<&[u16]> {
+        if self.quad.is_empty() {
+            return None;
+        }
+        Some(&self.quad[self.quad_at..self.quad_at + PAIR_ROWS * 2 * ROW])
     }
 
     /// Every half, `[rows][2][PAIR]`. Only a table that has not been rounded to
@@ -209,6 +239,16 @@ impl PairTable {
     pub fn use_precision(&mut self, precision: PairPrecision) {
         if PAIR == 0 {
             return;
+        }
+        // The blocks are halves; a table held as bytes is read through the two tables, so the second one is
+        // made from the halves while there are halves to make it from.
+        #[cfg(feature = "sym_token")]
+        if precision != PairPrecision::F16 && !self.quad.is_empty() {
+            if let Cells::Halves(halves) = &self.cells {
+                self.mixed = Cells::Halves(mixed_halves(halves));
+            }
+            self.quad = Aligned64::zeroed(0);
+            self.quad_at = 0;
         }
         if let Some(cells) = rounded(&self.cells, precision) {
             self.cells = cells;
@@ -257,10 +297,25 @@ impl PairTable {
 
     /// A second copy, for another NUMA node.
     pub(super) fn replicate(&self) -> PairTable {
-        PairTable {
+        let quad = Aligned64::from_slice(&self.quad);
+        // The copy starts wherever its allocation does, so the table's own start is found again.
+        let quad_at = if quad.is_empty() {
+            0
+        } else {
+            block_start(&quad)
+        };
+        let mut copied = PairTable {
             cells: copy(&self.cells),
             mixed: copy(&self.mixed),
+            quad,
+            quad_at,
+        };
+        if quad_at != self.quad_at && !copied.quad.is_empty() {
+            let rows = PAIR_ROWS * 2 * ROW;
+            copied.quad[quad_at..quad_at + rows]
+                .copy_from_slice(&self.quad[self.quad_at..self.quad_at + rows]);
         }
+        copied
     }
 }
 
@@ -292,6 +347,39 @@ fn rounded(cells: &Cells, precision: PairPrecision) -> Option<Cells> {
         PairPrecision::I8 => Some(cube_cells(halves)),
         PairPrecision::I8Row => Some(scaled_cells(halves)),
     }
+}
+
+/// Where in `buffer` a table of blocks starts so that it is on a 128-byte boundary: 0 or one row of halves in.
+#[cfg(feature = "sym_token")]
+fn block_start(buffer: &[u16]) -> usize {
+    let misaligned = (buffer.as_ptr() as usize) % 128;
+    debug_assert!(misaligned % 64 == 0, "an Aligned64 starts on a cache line");
+    (128 - misaligned) % 128 / std::mem::size_of::<u16>()
+}
+
+/// `hm`'s blocks from the main table, `halves` (`[PAIR_ROWS][ROW]`): for each pair `{a, b}`, row `{a, b}` and then
+/// row `{m(a), m(b)}`, from a 128-byte boundary; and where in the buffer they start.
+#[cfg(feature = "sym_token")]
+fn quad_halves(halves: &[u16]) -> (Aligned64<u16>, usize) {
+    use super::TOKENS;
+    use super::pair::pair_row;
+    use crate::tokens::{FeatureIndex, mirror_row};
+
+    // Room to move the start up to 128 bytes in.
+    let mut quad = Aligned64::zeroed(PAIR_ROWS * 2 * ROW + 64);
+    let at = block_start(&quad);
+    let mut row = 0;
+    for lo in 0..TOKENS as FeatureIndex {
+        for hi in lo + 1..TOKENS as FeatureIndex {
+            let reflected = pair_row(mirror_row(lo), mirror_row(hi)) * ROW;
+            let block = &mut quad[at + row * 2 * ROW..at + (row + 1) * 2 * ROW];
+            let (first, second) = block.split_at_mut(ROW);
+            first.copy_from_slice(&halves[row * ROW..(row + 1) * ROW]);
+            second.copy_from_slice(&halves[reflected..reflected + ROW]);
+            row += 1;
+        }
+    }
+    (quad, at)
 }
 
 /// `hm`'s second table from the first, `halves` (`[PAIR_ROWS][ROW]`): row `{a, b}` is the black half of row

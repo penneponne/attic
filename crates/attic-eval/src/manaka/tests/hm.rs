@@ -298,3 +298,52 @@ fn a_cache_forgets_its_states_for_another_network() {
         "the first crossing under another network starts from nothing"
     );
 }
+
+/// Held as halves, an hm table is read through its blocks, and the blocks' totals are the scalar reference's to
+/// the last bit for every fold, from any token against any others; rounded to bytes it has no blocks and reads the
+/// two tables, which the test above holds.
+#[test]
+fn the_blocks_read_what_each_fold_reads_and_bytes_drop_them() {
+    use super::super::PairPrecision;
+    use super::super::pair::{quad_totals, quad_totals_scalar};
+    use crate::tokens::FeatureIndex;
+
+    const { assert!(HM, "this test is for the hm build") };
+    let net = synthetic();
+    let quad = net
+        .pair
+        .quad()
+        .expect("an hm table held as halves has its blocks");
+    let mut state = 23u64;
+    let mut pick = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) as usize % super::super::TOKENS) as FeatureIndex
+    };
+    for count in 0..40 {
+        let token = pick();
+        let mut others = Vec::new();
+        while others.len() < count {
+            let other = pick();
+            if other != token && !others.contains(&other) {
+                others.push(other);
+            }
+        }
+        for folded in [[false, false], [true, false], [false, true], [true, true]] {
+            let lines = folded.map(|f| usize::from(f) * super::super::pair_table::ROW);
+            let want = quad_totals_scalar(quad, token, &others, lines);
+            let got = quad_totals(quad, token, &others, folded);
+            for (g, w) in got.iter().zip(&want) {
+                assert_eq!(g.to_bits(), w.to_bits(), "{count} others, folds {folded:?}");
+            }
+        }
+    }
+    let mut bytes = synthetic().replicate();
+    assert!(bytes.pair.quad().is_some(), "a copy keeps its blocks");
+    bytes.use_pair_precision(PairPrecision::I8);
+    assert!(
+        bytes.pair.quad().is_none(),
+        "a table held as bytes reads the two tables"
+    );
+}
