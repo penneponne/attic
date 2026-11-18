@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use attic_eval::{Backend, NnueNetwork, active_backend, evaluate, load_network};
+use attic_eval::{NnueNetwork, active_backend, evaluate, load_network};
 use attic_state::{Position, parse_sfen, parse_usi_move};
 
 const TOLERANCE: i32 = 0;
@@ -105,27 +105,24 @@ fn position_for(fixture: &EvalFixture) -> Position {
 }
 
 /// Backend selection is a compile-time decision, so a VNNI-capable CPU running
-/// a scalar build means the build was not made for its host. On a CPU without
-/// VNNI this only logs the scalar path. CI pins a baseline CPU instead of the
-/// host and says so with `ATTIC_BASELINE_BUILD`; the scalar path is then the
-/// right one even where the runner's CPU has VNNI.
+/// a scalar `-C target-cpu=native` build of the shape that has the AVX-512
+/// kernels means the build was not made for its host. Any other build only logs
+/// the backend it compiled: under a fixed baseline such as `x86-64-v3`, or for a
+/// shape without AVX-512 kernels, the scalar backend is correct on any CPU.
 fn assert_simd_path_selected() {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        target_cpu_native,
+        target_arch = "x86_64",
+        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    ))]
     {
         let has_vnni = std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("avx512vnni");
-        if std::env::var_os("ATTIC_BASELINE_BUILD").is_some() {
+        if has_vnni {
             assert_eq!(
                 active_backend(),
-                Backend::Scalar,
-                "ATTIC_BASELINE_BUILD is set, so the build should not have \
-                 enabled AVX-512 VNNI",
-            );
-        } else if has_vnni {
-            assert_eq!(
-                active_backend(),
-                Backend::Avx512Vnni,
+                attic_eval::Backend::Avx512Vnni,
                 "CPU reports AVX-512 VNNI but this build compiled the scalar \
                  backend — check that `-C target-cpu=native` is in effect",
             );
@@ -136,9 +133,13 @@ fn assert_simd_path_selected() {
             );
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(
+        target_cpu_native,
+        target_arch = "x86_64",
+        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    )))]
     eprintln!(
-        "eval parity running on the scalar backend ({:?}): non-x86_64 target",
+        "eval parity running on the {:?} backend: the build's target features select it",
         active_backend()
     );
 }

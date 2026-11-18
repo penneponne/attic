@@ -10,9 +10,11 @@
 //!
 //! Both backends stay **compiled unconditionally**, only the call sites being
 //! `cfg`-gated, so that the SIMD-equals-scalar tests in each backend module keep
-//! exercising both. Those tests, and only those, probe the CPU at run time, so
-//! that they skip gracefully on a host without the features. Whichever backend
-//! a build selects, the evaluation output is bit-identical.
+//! exercising both. Those tests probe the CPU at run time, so that they skip
+//! gracefully on a host without the features. The only other run-time probe is
+//! a test compiled solely into a `-C target-cpu=native` build, the one build
+//! shape in which the host's features are the build's. Whichever backend a
+//! build selects, the evaluation output is bit-identical.
 //!
 //! ## Safety invariants
 //!
@@ -462,41 +464,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_backend_is_avx512_when_cpu_supports_vnni() {
-        // Backend selection is compile-time, so this checks the *build* was
-        // configured for its host: under `-C target-cpu=native` a VNNI-capable
-        // CPU must yield the SIMD backend, and a scalar one here means the build
-        // did not enable the host's features.
-        //
-        // CI is the one place that is not built for its host: it pins
-        // `-C target-cpu=x86-64-v3` so cached artefacts run on any runner, and
-        // sets `ATTIC_BASELINE_BUILD` to say so. A runner whose CPU happens to
-        // have AVX-512 VNNI must then still get the scalar backend, which is
-        // what this asserts in that case.
-        #[cfg(target_arch = "x86_64")]
-        {
-            let has_vnni = std::arch::is_x86_feature_detected!("avx512f")
-                && std::arch::is_x86_feature_detected!("avx512bw")
-                && std::arch::is_x86_feature_detected!("avx512vnni");
-            if std::env::var_os("ATTIC_BASELINE_BUILD").is_some() {
-                assert_eq!(
-                    active_backend(),
-                    Backend::Scalar,
-                    "ATTIC_BASELINE_BUILD is set, so the build should not have \
-                     enabled AVX-512 VNNI",
-                );
-            } else if has_vnni {
-                assert_eq!(
-                    active_backend(),
-                    Backend::Avx512Vnni,
-                    "CPU reports AVX-512 VNNI but this build compiled the scalar \
-                     backend — check that `-C target-cpu=native` is in effect",
-                );
-            } else {
-                assert_eq!(active_backend(), Backend::Scalar);
-            }
+    fn active_backend_follows_compile_time_target_features() {
+        // Only the shape that has the AVX-512 kernels reports the SIMD backend;
+        // every other shape runs the AVX2 or scalar kernels on the same target
+        // features, and says so.
+        let simd_build = cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni",
+            feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+        ));
+        let expected = if simd_build {
+            Backend::Avx512Vnni
+        } else {
+            Backend::Scalar
+        };
+        assert_eq!(active_backend(), expected);
+    }
+
+    // Only a `-C target-cpu=native` build promises the host's features; under a
+    // fixed baseline (CI pins `x86-64-v3`) the scalar backend is correct on any
+    // CPU, a runner that happens to have AVX-512 VNNI included. The shape with
+    // the AVX-512 kernels is the one that must pick them up.
+    #[cfg(all(
+        target_cpu_native,
+        target_arch = "x86_64",
+        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    ))]
+    #[test]
+    fn native_build_on_a_vnni_host_is_the_simd_build() {
+        let has_vnni = std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vnni");
+        if has_vnni {
+            assert_eq!(
+                active_backend(),
+                Backend::Avx512Vnni,
+                "a `-C target-cpu=native` build on an AVX-512 VNNI host compiled \
+                 the scalar backend",
+            );
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        assert_eq!(active_backend(), Backend::Scalar);
     }
 }

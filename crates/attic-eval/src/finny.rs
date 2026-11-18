@@ -34,12 +34,12 @@
 //! multiset of adds and subs is bit-identical. The cached rebuild is
 //! value-invariant against a from-scratch refresh, not merely close.
 //!
-//! One boxed cache per search worker, allocated at worker setup and shared with
-//! nobody, so Lazy SMP needs no locking.
+//! One cache per search worker, allocated at worker setup and shared with
+//! nobody, so Lazy SMP needs no locking. Its entry table lives on large pages.
 
 use attic_state::{Color, Position, Square};
+use attic_storage::{LargePageBox, Zeroable};
 
-use crate::aligned::Aligned64;
 use crate::features::{
     FeatureIndex, FeatureSet, MAX_ACTIVE_FEATURES, active_features_into, diff_feature_sets,
 };
@@ -48,26 +48,28 @@ use crate::types::{HIDDEN_SIZE, NnueNetwork};
 
 /// One cached refreshed half: the accumulation and the active-feature list it
 /// was built from.
+///
+/// The 64-byte alignment keeps every entry's accumulation on a cache-line
+/// boundary, so the AVX-512 kernels' 512-bit loads never split a line.
 #[derive(Debug)]
+#[repr(C, align(64))]
 struct FinnyEntry {
     /// `ft_biases + sum(ft_weights[c] for c in active)`, valid only while
     /// [`Self::initialized`] is set.
-    accumulation: Aligned64<i16>,
+    accumulation: [i16; HIDDEN_SIZE],
     /// The active-feature multiset [`Self::accumulation`] corresponds to.
     active: FeatureSet,
     /// Whether [`Self::accumulation`] currently satisfies the module invariant.
     initialized: bool,
 }
 
-impl FinnyEntry {
-    fn new() -> Self {
-        FinnyEntry {
-            accumulation: Aligned64::<i16>::zeroed(HIDDEN_SIZE),
-            active: FeatureSet::new(),
-            initialized: false,
-        }
-    }
-}
+// SAFETY: every field is an integer array, an integer-only [`FeatureSet`] or a
+// `bool`, each valid all-zero (a zeroed entry is an uninitialised one), and
+// none has drop glue.
+unsafe impl Zeroable for FinnyEntry {}
+
+/// `[perspective][own king square]`, over the raw 81 squares.
+type FinnyTable = [[FinnyEntry; Square::COUNT]; Color::COUNT];
 
 /// A worker-private finny table: one [`FinnyEntry`] per (perspective, own-king
 /// square).
@@ -79,7 +81,7 @@ pub struct FinnyCache {
     /// `[perspective][own king square]`, over the raw 81 squares. The bucket key
     /// must be the untouched king square rather than the mirrored `sq_k_code`:
     /// two mirror-equivalent squares generate different index sets.
-    entries: [[FinnyEntry; Square::COUNT]; Color::COUNT],
+    entries: LargePageBox<FinnyTable>,
     /// Identity of the network the entries were built against; see
     /// [`network_token`]. `None` until the first rebuild.
     token: Option<NetworkToken>,
@@ -109,18 +111,18 @@ fn network_token(net: &NnueNetwork) -> NetworkToken {
 }
 
 impl FinnyCache {
-    /// Allocates an empty cache on the heap. The entries own ~0.5 MiB of
-    /// accumulation buffers, so this belongs at worker setup, not on the search
+    /// Allocates an empty cache. The entry table is ~0.5 MiB, rounded up to a
+    /// whole large page, so this belongs at worker setup, not on the search
     /// path.
-    pub fn new() -> Box<Self> {
-        Box::new(FinnyCache {
-            entries: std::array::from_fn(|_| std::array::from_fn(|_| FinnyEntry::new())),
+    pub fn new() -> Self {
+        FinnyCache {
+            entries: LargePageBox::zeroed(),
             token: None,
             scratch_active: Vec::with_capacity(MAX_ACTIVE_FEATURES),
             scratch_set: FeatureSet::new(),
             removed: Vec::with_capacity(2 * MAX_ACTIVE_FEATURES),
             added: Vec::with_capacity(2 * MAX_ACTIVE_FEATURES),
-        })
+        }
     }
 
     /// Drops every cached half. The entries keep their allocations and are
@@ -199,6 +201,12 @@ impl FinnyCache {
     }
 }
 
+impl Default for FinnyCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 impl FinnyCache {
     /// Whether the bucket currently holds a valid cached half.
@@ -223,7 +231,7 @@ impl FinnyCache {
                     }
                 }
                 assert_eq!(
-                    &*entry.accumulation,
+                    entry.accumulation.as_slice(),
                     expected.as_slice(),
                     "finny entry violates the biases+columns invariant",
                 );
