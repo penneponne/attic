@@ -106,31 +106,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: sfnn-threat
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
-          - name: nnue-kp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time
@@ -199,9 +199,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             shape: synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             shape: synn_token_128x2_32_32_pair16_m8_f2
     steps:
       - uses: actions/checkout@v4
@@ -220,31 +220,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: sfnn-threat
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
-          - name: nnue-kp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time
@@ -264,31 +264,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: sfnn-threat
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
             args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
-          - name: nnue-kp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time
