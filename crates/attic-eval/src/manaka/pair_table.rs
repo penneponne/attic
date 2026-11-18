@@ -353,7 +353,7 @@ fn rounded(cells: &Cells, precision: PairPrecision) -> Option<Cells> {
 #[cfg(feature = "sym_token")]
 fn block_start(buffer: &[u16]) -> usize {
     let misaligned = (buffer.as_ptr() as usize) % 128;
-    debug_assert!(misaligned % 64 == 0, "an Aligned64 starts on a cache line");
+    debug_assert!(misaligned.is_multiple_of(64), "an Aligned64 starts on a cache line");
     (128 - misaligned) % 128 / std::mem::size_of::<u16>()
 }
 
