@@ -57,6 +57,14 @@ option name NumaPolicy type string default auto\n\
 option name USI_Ponder type check default false\n\
 option name Stochastic_Ponder type check default false\n\
 usiok\n";
+    // The scale's default is the evaluator's: 16, or Sirius's 26 under the threat shape.
+    let expected = expected.replace(
+        "option name FV_SCALE type spin default 16 ",
+        &format!(
+            "option name FV_SCALE type spin default {} ",
+            attic_search::FV_SCALE_DEFAULT
+        ),
+    );
     assert_eq!(out, expected);
 }
 
