@@ -300,7 +300,7 @@ pub(super) fn quad_totals(
 
 /// [`quad_totals`] in plain `f32`: the reference the AVX2 path is held to.
 #[cfg(any(
-    test,
+    all(test, feature = "sym_hm"),
     not(all(
         target_arch = "x86_64",
         target_feature = "avx2",
