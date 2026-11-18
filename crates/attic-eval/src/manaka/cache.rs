@@ -31,11 +31,17 @@ impl Default for FinnyCache {
 #[derive(Debug, Default)]
 pub struct FinnyCache;
 
+#[cfg(not(feature = "sym_token"))]
 impl FinnyCache {
-    pub fn new() -> Box<Self> {
-        // `Box::default`, not `Box::new(FinnyCache::default())`: the token
-        // shapes' cache is a unit struct, and clippy rejects calling `default`
-        // on one. This spelling is the same for both.
-        Box::default()
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "sym_token")]
+impl FinnyCache {
+    // A unit struct: clippy rejects calling `default` on one.
+    pub fn new() -> Self {
+        FinnyCache
     }
 }

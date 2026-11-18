@@ -27,13 +27,11 @@ env:
   # is selected by `cfg(target_feature = "avx512…")`, which x86-64-v3 does not
   # enable, so CI exercises the portable path. The AVX-512 kernels' own unit
   # tests enable their features per function and probe the CPU at run time, so
-  # they still run on a runner that has the instructions.
+  # they still run on a runner that has the instructions. The two tests that
+  # check a build matches its host are compiled only into a
+  # `-C target-cpu=native` build (`attic-eval/build.rs` emits the cfg), so a
+  # runner with AVX-512 VNNI is not expected to run the SIMD backend here.
   RUSTFLAGS: "-C target-cpu=x86-64-v3"
-  # Tells the two tests that check the build matches its host (`active_backend`
-  # in attic-eval) that this build deliberately does not: a runner with
-  # AVX-512 VNNI is expected to run the scalar backend here. Without it those
-  # tests fail on whichever runners happen to have that CPU.
-  ATTIC_BASELINE_BUILD: "1"
 
 # The network shape is a build-time feature and exactly one must be selected
 # (`attic-eval` refuses to compile with none or two), so `--all-features` can

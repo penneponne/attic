@@ -605,8 +605,8 @@ impl Accumulator {
 pub struct FinnyCache;
 
 impl FinnyCache {
-    pub fn new() -> Box<Self> {
-        Box::new(FinnyCache)
+    pub fn new() -> Self {
+        FinnyCache
     }
 }
 

@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use attic_numa::{DEFAULT_POLICY, NumaConfig, NumaIndex, SysfsOptions};
+use attic_numa::{DEFAULT_POLICY, NumaConfig, NumaError, NumaIndex, SysfsOptions};
 use attic_search::{
     BookConfig, BookHit, EnteringKingConfig, EnteringKingRule, PonderSignal, Prng, PvBound, PvInfo,
     PvOutputConfig, PvSink, QSearch, RootMove, Search, SearchControl, SharedHistories, TimeControl,
@@ -20,14 +20,14 @@ use crate::bench;
 use crate::engine_options::{OverrideLine, parse_override_line};
 use crate::formatter::Formatter;
 use crate::option_profile::{ENGINE_OPTION_PROFILE_FILE, read_engine_option_profile};
-use crate::options::{OptionStore, OptionValue};
+use crate::options::{OptionError, OptionStore, OptionValue};
 use crate::parser::{Command, GoLimits, MATE_UNLIMITED_MS, PositionSfen, parse_line};
 
 /// The `id name` value. Its version tracks how far upstream YaneuraOu has been
 /// ported and nothing else — it moves only on an upstream catch-up, never for a
 /// divergence, fix, or addition. The `git` suffix marks a build past the last
-/// tagged release; a tagged release snapshot carries the plain `Attic 9.80`.
-pub const ENGINE_NAME: &str = "Attic 9.80git";
+/// tagged release; a tagged release snapshot carries the plain `Attic 9.96`.
+pub const ENGINE_NAME: &str = "Attic 9.96git";
 pub const ENGINE_AUTHOR: &str = "Kei Ishida <ishida.kei@gmail.com>";
 
 /// The largest iterative-deepening depth a `go` ever requests: one below
@@ -36,13 +36,11 @@ pub const ENGINE_AUTHOR: &str = "Kei Ishida <ishida.kei@gmail.com>";
 const SEARCH_MAX_DEPTH: i32 = 245;
 
 // isready keep-alive.
-/// Stop-flag poll interval of the keep-alive helper.
-const KEEP_ALIVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Polls between bare keep-alive newlines: `50 * 100ms = 5s`. A GUI reads the
-/// periodic empty line as a sign the engine is alive and does not time out
-/// while the `USI_Hash` allocation and the ~215 MiB `nn.bin` load run between
-/// `isready` and `readyok`.
-const KEEP_ALIVE_TICKS_PER_NEWLINE: u32 = 50;
+/// Period of the bare keep-alive newlines. A GUI reads the periodic empty line
+/// as a sign the engine is alive and does not time out while the `USI_Hash`
+/// allocation and the ~215 MiB `nn.bin` load run between `isready` and
+/// `readyok`.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
 // --- Reference USI score conversion (`format_score`). ---
 /// `VALUE_MATE`.
@@ -156,6 +154,8 @@ struct SearchState {
     /// reference never touches `previousTimeReduction`, so the persisted value
     /// must stay put.
     time_state: Option<(Value, Value, Option<f64>)>,
+    /// The main worker's `callsCnt` down-counter as the search left it.
+    calls_cnt: i32,
 }
 
 pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
@@ -168,10 +168,9 @@ pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
     /// The loaded network holder, present only after a successful `isready`.
     /// `go` before this is set replies `bestmove resign`.
     eval: Option<LoadedEval>,
-    /// The shared transposition table. Sized from `USI_Hash` at the first
-    /// successful `isready` and by every later `setoption name USI_Hash`,
-    /// cleared on `usinewgame`. `run_root` bumps the generation itself; the
-    /// driver never does. `resize` / `clear` go through [`Arc::get_mut`], which
+    /// The shared transposition table. Sized from `USI_Hash` at every
+    /// successful `isready`, cleared on `usinewgame`. `run_root` bumps the
+    /// generation itself; the driver never does. `resize` / `clear` go through [`Arc::get_mut`], which
     /// succeeds only once every worker clone has dropped — the
     /// lifecycle-exclusivity contract on [`TranspositionTable`].
     tt: Arc<TranspositionTable>,
@@ -198,6 +197,11 @@ pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
     best_previous_score: Value,
     best_previous_average_score: Value,
     previous_time_reduction: f64,
+    /// The reference `SearchManager::callsCnt`: the main worker's `check_time`
+    /// down-counter, resumed by each `go` and reset to `0` by `usinewgame`. It
+    /// decides where a node-limited search stops, so a `go nodes` result
+    /// depends on the searches before it in the game.
+    calls_cnt: i32,
     /// The root game ply of the last completed real search. At the next search
     /// start an odd `last_game_ply - game_ply` means the side to move
     /// alternated — e.g. a Stochastic_Ponder rewind — and flips the sign of the
@@ -210,16 +214,41 @@ pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
     /// The last `go` command's limits, retained so a Stochastic_Ponder
     /// `ponderhit` can re-issue it with `ponder` stripped.
     last_go: Option<GoLimits>,
+    /// Set when the last `go ponder` actually rewound the position under
+    /// Stochastic_Ponder; only then does `ponderhit` restart the search. A
+    /// position without a `moves` clause is pondered in place, and its
+    /// `ponderhit` continues the running search as a plain one does.
+    stochastic_ponder_rewound: bool,
     /// The worker thread pool: a main-worker slot plus `Threads − 1` persistent
     /// helper threads following the reference `idle_loop` (park → receive job →
     /// run → report → park). The main worker is the per-`go` coordinator thread
     /// [`Self::handle_go`] spawns. Helpers own game-scoped histories, reset in
-    /// place on `usinewgame` and dropped by recreating the pool on a `Threads`
-    /// resize.
+    /// place on `usinewgame` and dropped by recreating the pool when an `isready`
+    /// applies a changed `Threads` or `NumaPolicy`.
     pool: ThreadPool,
     /// The active NUMA layout, detected once at construction from the engine
-    /// default policy and replaced by every `setoption name NumaPolicy`.
+    /// default policy and replaced at `isready` by a pending `NumaPolicy`.
     numa_config: NumaConfig,
+    /// The `NumaPolicy` option value as of the last resource application. The
+    /// binding decision reads it, so a `NumaPolicy` set but not yet applied
+    /// leaves the live pool's binding unchanged.
+    numa_policy: String,
+    /// A validated `NumaPolicy` layout, set by `setoption` and applied at the
+    /// next `isready`, as the reference defers it.
+    pending_numa: Option<NumaConfig>,
+    /// Set when the NUMA layout, the `NumaPolicy` value or the thread count
+    /// changes, so the next `USI_Hash` application reallocates the table even
+    /// at an unchanged size and its pages are first-touched under the new
+    /// layout.
+    hash_needs_reallocation: bool,
+    /// Whether a search may have written the transposition table since it was
+    /// last cleared, so `usinewgame` can skip clearing a table that `isready`
+    /// has just allocated and cleared.
+    tt_written: bool,
+    /// Whether the resource options have been applied once. The reference
+    /// creates no workers before that, so until then the allocation line
+    /// reports zero threads, although [`Self::pool`] already exists here.
+    resources_applied: bool,
     /// The current worker → NUMA-node binding assignment, empty when binding is
     /// inactive. Index `i` is worker `i`: slot 0 is the per-`go` coordinator,
     /// `1..` the helper threads.
@@ -233,9 +262,9 @@ pub struct UsiDriver<R: BufRead, W: Write + Send + 'static> {
     /// entry clones the one loaded instance, with it each points at its *system*
     /// node's replica.
     worker_networks: Vec<Arc<Search>>,
-    /// Poll interval of the `isready` keep-alive helper thread, overridable so a
-    /// test can drive it faster than the reference cadence.
-    keep_alive_poll: Duration,
+    /// Newline period of the `isready` keep-alive helper thread, overridable so
+    /// a test can drive it faster than the reference cadence.
+    keep_alive_interval: Duration,
 }
 
 impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
@@ -292,23 +321,29 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             best_previous_score: VALUE_INFINITE,
             best_previous_average_score: VALUE_INFINITE,
             previous_time_reduction: 0.85,
+            calls_cnt: 0,
             last_game_ply: 0,
             last_position: (PositionSfen::StartPos, Vec::new()),
             last_go: None,
+            stochastic_ponder_rewound: false,
             pool,
             numa_config,
+            numa_policy: "auto".to_string(),
+            pending_numa: None,
+            hash_needs_reallocation: false,
+            tt_written: false,
+            resources_applied: false,
             numa_bound,
             worker_shared,
             worker_networks: Vec::new(),
-            keep_alive_poll: KEEP_ALIVE_POLL_INTERVAL,
+            keep_alive_interval: KEEP_ALIVE_INTERVAL,
         }
     }
 
-    /// Override the `isready` keep-alive poll interval. The newline still fires
-    /// only after [`KEEP_ALIVE_TICKS_PER_NEWLINE`] polls, so this scales the
-    /// whole cadence rather than just the poll.
-    pub fn with_keep_alive_poll(mut self, poll: Duration) -> Self {
-        self.keep_alive_poll = poll;
+    /// Override the period of the `isready` keep-alive newlines (5 s by
+    /// default).
+    pub fn with_keep_alive_interval(mut self, interval: Duration) -> Self {
+        self.keep_alive_interval = interval;
         self
     }
 
@@ -328,12 +363,15 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
                 Command::SetOption { name, value } => self.handle_setoption(&name, &value)?,
                 Command::UsiNewGame => self.handle_usinewgame(),
                 Command::Position { sfen, moves } => self.handle_position(sfen, &moves)?,
-                Command::Go(limits) => self.handle_go(limits)?,
+                Command::Go(limits) => self.handle_go(limits, None)?,
                 Command::Stop => self.handle_stop(),
                 Command::GameOver => self.handle_gameover(),
                 Command::PonderHit => self.handle_ponderhit()?,
                 Command::Bench(tokens) => self.handle_bench(&tokens)?,
                 Command::ClipStats(tokens) => self.handle_clipstats(&tokens)?,
+                Command::CriticalError { command, reason } => {
+                    self.handle_critical_error(&command, &reason)?
+                }
                 Command::Quit => {
                     self.finish_search_join();
                     return Ok(());
@@ -355,12 +393,6 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         Formatter::new(&mut *self.lock_writer()).info_string(msg)
     }
 
-    /// Emit one verbatim line with no USI keyword prefix — the option-override
-    /// `Error : ...` diagnostics the reference writes to raw `std::cout`.
-    fn emit_raw_line(&self, text: &str) -> io::Result<()> {
-        Formatter::new(&mut *self.lock_writer()).raw_line(text)
-    }
-
     /// Emit one `bestmove <mv>` line.
     fn bestmove(&self, mv: &str) -> io::Result<()> {
         Formatter::new(&mut *self.lock_writer()).bestmove(mv)
@@ -373,8 +405,9 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
     /// If a search worker is running, request its stop and join it, reclaiming
     /// the session-owned histories. Idempotent, and setting the stop flag is
-    /// harmless once the worker has finished naturally: a short fixed-depth
-    /// search that never reached a `check_time` checkpoint completes regardless.
+    /// harmless once the worker has finished naturally. A search still running
+    /// is stopped at its next `check_time` checkpoint, so a caller that needs a
+    /// fixed-depth result waits for the `bestmove` before calling this.
     ///
     /// Joining also drops the worker's `Arc` clone of the transposition table,
     /// so afterwards `Arc::get_mut` (used by `resize` / `clear`) succeeds.
@@ -386,6 +419,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
                 .join()
                 .expect("search worker thread must not panic");
             self.histories = Some(state.histories);
+            self.calls_cnt = state.calls_cnt;
             // Carry the finished search's time-management outputs forward.
             if let Some((score, avg, tr)) = state.time_state {
                 self.best_previous_score = score;
@@ -398,28 +432,84 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         }
     }
 
-    /// Resize the shared transposition table to the current `USI_Hash` value in
-    /// MiB. The caller must have run [`Self::finish_search_join`] first so
-    /// [`Arc::get_mut`] succeeds.
-    fn resize_tt_to_hash_option(&mut self) {
+    /// Apply the resource options `setoption` only stores — a pending
+    /// `NumaPolicy` layout, `Threads`, then `USI_Hash` — in the reference's
+    /// `isready` order. The caller must have run [`Self::finish_search_join`]
+    /// first so [`Arc::get_mut`] succeeds.
+    ///
+    /// The reference recreates its workers at every `isready`; here the pool is
+    /// rebuilt only when the layout or the thread count changed, because
+    /// `usinewgame` already gives every worker fresh tables. Returns whether
+    /// the pool was rebuilt.
+    fn apply_resource_options(&mut self) -> bool {
+        let mut rebuild = false;
+        if let Some(config) = self.pending_numa.take() {
+            self.numa_config = config;
+            self.hash_needs_reallocation = true;
+            rebuild = true;
+        }
+        // The binding decision reads the option's value, not the layout's
+        // source: a rejected custom value keeps the previous layout but stays
+        // the option's value, and the reference then binds as for any custom
+        // string.
+        let policy = self.options.text("NumaPolicy");
+        if self.numa_policy != policy {
+            self.numa_policy = policy.to_string();
+            self.hash_needs_reallocation = true;
+            rebuild = true;
+        }
+        let requested = self.options.threads();
+        if self.pool.size() != requested {
+            self.hash_needs_reallocation = true;
+            rebuild = true;
+        }
+        if rebuild {
+            self.rebuild_pool(requested);
+        }
+
         let mb = self.options.spin("USI_Hash").max(1) as usize;
-        Arc::get_mut(&mut self.tt)
-            .expect("no search worker holds the TT during a USI_Hash resize")
-            .resize(mb);
+        let tt = Arc::get_mut(&mut self.tt)
+            .expect("no search worker holds the TT during a USI_Hash resize");
+        let allocated = if std::mem::take(&mut self.hash_needs_reallocation) {
+            tt.reallocate(mb);
+            true
+        } else {
+            tt.resize(mb)
+        };
+        // A fresh table reads as empty, but its pages are not yet written; the
+        // reference's `isready` clear is what first writes them.
+        if allocated {
+            self.clear_tt();
+        }
+        self.resources_applied = true;
+        rebuild
     }
 
-    /// Recompute the worker → NUMA-node binding for the current `Threads` /
-    /// `NumaPolicy` options and rebuild the worker pool with it. Every pool
+    /// Clear the transposition table with one thread per search worker, each
+    /// bound as that worker is, as the reference clears it.
+    fn clear_tt(&mut self) {
+        let config = &self.numa_config;
+        let bound = &self.numa_bound;
+        Arc::get_mut(&mut self.tt)
+            .expect("no search worker holds the TT during a clear")
+            .clear_with_threads(self.pool.size(), |i| {
+                if let Some(&node) = bound.get(i) {
+                    config.bind_current_thread_to_numa_node(node);
+                }
+            });
+        self.tt_written = false;
+    }
+
+    /// Recompute the worker → NUMA-node binding for `requested` workers under
+    /// the active NUMA layout and rebuild the worker pool with it. Every pool
     /// (re)build routes through here so [`Self::numa_bound`] stays consistent
     /// with the live pool. Helpers bind once at spawn; the per-`go` coordinator
     /// binds at each `go`.
     ///
     /// Callers must have joined any running search first — a resize destroys and
     /// recreates the helper threads.
-    fn rebuild_pool(&mut self) {
-        let requested = self.options.threads();
-        let policy = self.options.text("NumaPolicy").to_string();
-        self.numa_bound = compute_numa_binding(&self.numa_config, &policy, requested);
+    fn rebuild_pool(&mut self, requested: usize) {
+        self.numa_bound = compute_numa_binding(&self.numa_config, &self.numa_policy, requested);
         // Every pool rebuild resets the shared tables, matching the reference.
         // The coordinator's own game-scoped per-worker tables persist, so only
         // its shared handle is swapped.
@@ -507,10 +597,15 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
     /// Emit the `Using N thread[s][ with NUMA node thread binding: ...]` line.
     fn emit_thread_allocation_information(&self) -> io::Result<()> {
+        let (threads, bound) = if self.resources_applied {
+            (self.pool.size(), &self.numa_bound[..])
+        } else {
+            (0, &[][..])
+        };
         self.emit_info_string_lines(&thread_allocation_information_as_string(
-            self.pool.size(),
+            threads,
             &self.numa_config,
-            &self.numa_bound,
+            bound,
         ))
     }
 
@@ -645,52 +740,60 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     }
 
     /// Apply one override line, mirroring the reference `build_option`. An
-    /// out-of-range or ill-typed value is silently not stored, as the reference
-    /// `operator=` range guard is, and the option is locked FIXED either way so
-    /// later `setoption`s cannot change it.
+    /// accepted value locks the option FIXED so later `setoption`s cannot
+    /// change it; a rejected one is reported and leaves the option settable.
+    /// Every `isready` re-reads the files, so reading a fixed option's own
+    /// value again is silent.
     fn apply_override_line(&mut self, line: &str) -> io::Result<()> {
-        let (name, value, invalid) = match parse_override_line(line) {
-            OverrideLine::Empty => return Ok(()),
-            OverrideLine::Plain { name, value } => (name, value, Vec::new()),
-            OverrideLine::Full {
-                name,
-                value,
-                invalid_tokens,
-            } => (name, value, invalid_tokens),
+        let (name, value) = match parse_override_line(line, |n| self.options.is_string(n)) {
+            OverrideLine::Skip => return Ok(()),
+            OverrideLine::InvalidDeclaration => {
+                return self.info_string(&format!("Error : invalid option declaration : {line}"));
+            }
+            OverrideLine::Override { name, value } => (name, value),
         };
-
-        // Reported first, but do not abort the override.
-        for tok in &invalid {
-            self.emit_raw_line(&format!("Error : invalid command: {tok}"))?;
-        }
 
         let Some(canonical) = self.options.canonical_name(&name) else {
-            return self.emit_raw_line(&format!("Error : option name not found : {name}"));
+            return self.info_string(&format!("Error : option name not found : {name}"));
         };
 
-        // Order matters: a fixed option ignores `set_value`.
-        let _ = self.options.set_value(canonical, &value);
+        let normalized = if self.options.is_string(canonical) && value == "<empty>" {
+            ""
+        } else {
+            value.as_str()
+        };
+        // A fixed option takes no new value: its own value again is a silent
+        // no-op, any other is rejected.
+        let accepted = if self.options.is_fixed(canonical) {
+            if self.options.value_text(canonical) == Some(normalized) {
+                return Ok(());
+            }
+            false
+        } else {
+            match self.options.set_value(canonical, &value) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.report_option_rejection(&e)?;
+                    false
+                }
+            }
+        };
+        if !accepted {
+            return self.info_string(&format!(
+                "Error : engine option override rejected. name = {name} , value = {value}"
+            ));
+        }
         self.options.mark_fixed(canonical);
 
-        // Mirror the reference option `on_change` handlers for the options whose
-        // value drives a resource.
-        if canonical.eq_ignore_ascii_case("Threads") {
-            self.finish_search_join();
-            self.rebuild_pool();
-        } else if canonical.eq_ignore_ascii_case("USI_Hash") {
-            self.finish_search_join();
-            self.resize_tt_to_hash_option();
-        } else if canonical.eq_ignore_ascii_case("NumaPolicy") {
-            // Unlike the `setoption` path, an override is a startup-time config
-            // step, so a bad value is reported rather than process-fatal and the
-            // previously detected config is kept.
-            self.finish_search_join();
+        // `Threads` and `USI_Hash` need nothing here: the `isready` that read
+        // this line applies them. `NumaPolicy` is validated now, as the
+        // reference's `on_change` handler does, and applied with them.
+        if canonical.eq_ignore_ascii_case("NumaPolicy") {
             let policy = self.options.text("NumaPolicy").to_string();
             match numa_config_from_policy(&policy, &real_sysfs_options()) {
-                Ok(cfg) => self.numa_config = cfg,
-                Err(msg) => self.info_string(&format!("NumaPolicy error: {msg}"))?,
+                Ok(cfg) => self.pending_numa = Some(cfg),
+                Err(_) => self.info_string(&numa_policy_invalid_message(&policy))?,
             }
-            self.rebuild_pool();
         }
 
         self.info_string(&format!(
@@ -709,7 +812,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         // here the heavy work is the whole block, so the keep-alive brackets all
         // of it.
         let outcome = {
-            let _keep_alive = KeepAlive::spawn(Arc::clone(&self.writer), self.keep_alive_poll);
+            let _keep_alive = KeepAlive::spawn(Arc::clone(&self.writer), self.keep_alive_interval);
             self.isready_heavy_job()?
         };
 
@@ -729,37 +832,39 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         self.reload_book()?;
         let path = self.nn_bin_path();
 
-        if self.eval.as_ref().is_some_and(|e| e.path == path) {
-            return Ok(IsreadyOutcome::Ready);
+        let mut reloaded = false;
+        if !self.eval.as_ref().is_some_and(|e| e.path == path) {
+            match Search::from_network_file_with_warnings(&path) {
+                Ok((search, warnings)) => {
+                    // The loader's non-fatal warnings (hash mismatches), mirroring
+                    // the reference `Detail::ReadParameters` diagnostics.
+                    for warning in &warnings {
+                        self.info_string(warning)?;
+                    }
+                    self.eval = Some(LoadedEval {
+                        path,
+                        source: Arc::new(search),
+                        // A reload starts with no replicas, dropping the stale set.
+                        replicas: BTreeMap::new(),
+                    });
+                    reloaded = true;
+                }
+                // The resource options stay pending until an `isready` succeeds.
+                Err(e) => return Ok(IsreadyOutcome::LoadFailed(e.to_string())),
+            }
         }
 
-        match Search::from_network_file_with_warnings(&path) {
-            Ok((search, warnings)) => {
-                // The loader's non-fatal warnings (hash mismatches), mirroring
-                // the reference `Detail::ReadParameters` diagnostics.
-                for warning in &warnings {
-                    self.info_string(warning)?;
-                }
-                // Only fires when the host never set `USI_Hash` itself; a
-                // `setoption` before this will already have sized the table.
-                if self.tt.cluster_count() == 0 {
-                    self.resize_tt_to_hash_option();
-                }
-                self.eval = Some(LoadedEval {
-                    path,
-                    source: Arc::new(search),
-                    // A reload starts with no replicas, dropping the stale set.
-                    replicas: BTreeMap::new(),
-                });
-                // As the reference does after a reload, so no replica is ever
-                // built on the search path.
-                self.rebuild_networks();
-                Ok(IsreadyOutcome::Ready)
-            }
-            Err(e) => Ok(IsreadyOutcome::LoadFailed(e.to_string())),
+        // A pool rebuild replicates the network itself; otherwise a reload
+        // still needs its replicas, so none is ever built on the search path.
+        if !self.apply_resource_options() && reloaded {
+            self.rebuild_networks();
         }
+        Ok(IsreadyOutcome::Ready)
     }
 
+    /// `Threads` and `USI_Hash` are only stored here; [`Self::handle_isready`]
+    /// applies them, as the reference does, so a host setting both never
+    /// briefly holds a table sized for the wrong thread layout.
     fn handle_setoption(&mut self, name: &str, value: &str) -> io::Result<()> {
         // The option store accepts any string, but mapping it to a `NumaConfig`
         // can fail loudly, and a successful set emits both info lines.
@@ -767,54 +872,45 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             return self.handle_setoption_numa_policy(value);
         }
         match self.options.set_value(name, value) {
-            Ok(()) => {
-                // Like the reference `ThreadPool::set`, this destroys and
-                // recreates every worker rather than diffing the count.
-                if name.eq_ignore_ascii_case("Threads") {
-                    self.finish_search_join();
-                    self.rebuild_pool();
-                    // The reference prints the allocation line from the
-                    // `Threads` on_change callback.
-                    self.emit_thread_allocation_information()?;
-                }
-                // The reference's callback waits for any running search before
-                // resizing.
-                if name.eq_ignore_ascii_case("USI_Hash") {
-                    self.finish_search_join();
-                    self.resize_tt_to_hash_option();
-                }
-                Ok(())
-            }
-            Err(e) => self.info_string(&format!("option {name} rejected: {e}")),
+            Ok(()) => Ok(()),
+            // The reference prints this bare, without `info string`.
+            Err(OptionError::UnknownOption) => Formatter::new(&mut *self.lock_writer())
+                .raw_line(&format!("No such option: {name}")),
+            Err(e) => self.report_option_rejection(&e),
         }
     }
 
-    /// Apply `setoption name NumaPolicy value <v>`.
+    /// The reference rejects empty, spin and check values silently; only a
+    /// combo miss is reported, by `Option::assign` itself.
+    fn report_option_rejection(&mut self, e: &OptionError) -> io::Result<()> {
+        match e {
+            OptionError::InvalidComboChoice { .. } => self.info_string(&e.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Validate `setoption name NumaPolicy value <v>` and keep the layout for
+    /// the next `isready`.
     ///
     /// `auto` / `system` detect from the system respecting affinity; `hardware`
     /// detects ignoring affinity; `none` is a single all-threads node; anything
-    /// else is a custom node string. A string that fails to parse or yields zero
-    /// nodes prints an `info string` and terminates the process, where the
-    /// reference reaches `std::exit(EXIT_FAILURE)`.
+    /// else is a custom node string. A custom string the reference rejects
+    /// prints one `info string` and keeps the previous layout, pending or
+    /// live; the option itself still holds the rejected value, as in the
+    /// reference.
     fn handle_setoption_numa_policy(&mut self, value: &str) -> io::Result<()> {
         // A fixed override silently ignores this, and `text` then returns the
         // fixed value — which is the one resolved below.
         let _ = self.options.set_value("NumaPolicy", value);
         let policy = self.options.text("NumaPolicy").to_string();
 
-        self.finish_search_join();
-
         match numa_config_from_policy(&policy, &real_sysfs_options()) {
-            Ok(cfg) => self.numa_config = cfg,
-            Err(msg) => {
-                self.info_string(&format!("NumaPolicy error: {msg}"))?;
-                let _ = self.lock_writer().flush();
-                std::process::exit(1);
-            }
+            Ok(cfg) => self.pending_numa = Some(cfg),
+            Err(_) => return self.info_string(&numa_policy_invalid_message(&policy)),
         }
 
-        // The reference's callback returns both lines joined by a newline.
-        self.rebuild_pool();
+        // The reference's callback still returns both lines, and they describe
+        // the layout and pool in effect, not the pending ones.
         self.emit_numa_config_information()?;
         self.emit_thread_allocation_information()
     }
@@ -853,9 +949,9 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     fn handle_usinewgame(&mut self) {
         self.finish_search_join();
         self.pos = Position::startpos();
-        Arc::get_mut(&mut self.tt)
-            .expect("no search worker holds the TT during usinewgame")
-            .clear();
+        if self.tt_written {
+            self.clear_tt();
+        }
         // The coordinator's per-worker tables are reset in place rather than
         // reallocated: a fresh allocation would page-fault, zero and miss in the
         // TLB all over again inside the next `go`.
@@ -867,30 +963,29 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         self.best_previous_score = VALUE_INFINITE;
         self.best_previous_average_score = VALUE_INFINITE;
         self.previous_time_reduction = 0.85;
+        self.calls_cnt = 0;
         // The `last_position` default is the reference's `"position startpos"`.
         self.last_game_ply = 0;
         self.last_position = (PositionSfen::StartPos, Vec::new());
         self.last_go = None;
-        // Every `Threads` / `NumaPolicy` change already rebuilt the pool, so the
-        // layout normally still matches and the live pool and tables are reset
-        // in place, as the reference `Worker::clear()` does. A mismatch would
-        // mean a change that skipped the rebuild; rebuild then, which builds
-        // every table fresh.
+        // Every `Threads` / `NumaPolicy` change is applied by an `isready` that
+        // rebuilds the pool, so the layout normally still matches and the live
+        // pool and tables are reset in place, as the reference `Worker::clear()`
+        // does. A mismatch would mean a change that skipped the rebuild; rebuild
+        // then, which builds every table fresh. The size is the live one: a
+        // `Threads` set since the last `isready` waits for the next.
         if self.pool_layout_is_current() {
             self.clear_worker_tables();
         } else {
-            self.rebuild_pool();
+            self.rebuild_pool(self.pool.size());
         }
     }
 
     /// Whether the live pool, binding and shared tables were built for the
-    /// current `Threads` / `NumaPolicy` options — what [`Self::rebuild_pool`]
-    /// would build now.
+    /// options as last applied — what [`Self::rebuild_pool`] would build now.
     fn pool_layout_is_current(&self) -> bool {
-        let requested = self.options.threads();
-        let policy = self.options.text("NumaPolicy");
-        self.pool.size() == requested.max(1)
-            && self.numa_bound == compute_numa_binding(&self.numa_config, policy, requested)
+        let size = self.pool.size();
+        self.numa_bound == compute_numa_binding(&self.numa_config, &self.numa_policy, size)
     }
 
     /// Reset the node-shared tables and every helper's game-scoped histories in
@@ -937,21 +1032,23 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         }
     }
 
-    fn handle_go(&mut self, limits: GoLimits) -> io::Result<()> {
+    /// `start_time` is the instant the search's clock starts from; `None`
+    /// starts it once the previous search has been joined.
+    fn handle_go(&mut self, limits: GoLimits, start_time: Option<Instant>) -> io::Result<()> {
         self.finish_search_join();
 
         self.last_go = Some(limits.clone());
 
         // Stochastic_Ponder ponders one move earlier than the retained
         // position; `ponderMode` stays set.
-        if limits.ponder && self.options.check("Stochastic_Ponder") {
-            self.apply_stochastic_ponder_rewind();
-        }
+        self.stochastic_ponder_rewound = limits.ponder
+            && self.options.check("Stochastic_Ponder")
+            && self.apply_stochastic_ponder_rewind();
 
         // Rewound under Stochastic_Ponder, so read after the rewind above.
         let game_ply = self.pos.ply() as i32;
 
-        let Some(job) = self.prepare_coordinator_job(limits, false) else {
+        let Some(job) = self.prepare_coordinator_job(limits, false, start_time) else {
             self.info_string("no eval network loaded; run isready")?;
             return self.bestmove("resign");
         };
@@ -965,6 +1062,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             SearchState {
                 histories: outcome.histories,
                 time_state: outcome.time_state,
+                calls_cnt: outcome.calls_cnt,
             }
         });
 
@@ -980,15 +1078,19 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
     /// Stochastic_Ponder `go ponder` rewind: the retained position with its
     /// last move dropped, installed as the search root. Best effort — nothing
-    /// to rewind, or a rebuild failure, leaves it untouched.
-    fn apply_stochastic_ponder_rewind(&mut self) {
+    /// to rewind, or a rebuild failure, leaves it untouched. Returns whether
+    /// the root was rewound.
+    fn apply_stochastic_ponder_rewind(&mut self) -> bool {
         let (sfen, moves) = &self.last_position;
-        if moves.is_empty() {
-            return;
-        }
-        let rewound = &moves[..moves.len() - 1];
-        if let Some(pos) = build_position_from(sfen, rewound) {
-            self.pos = pos;
+        let Some((_, rewound)) = moves.split_last() else {
+            return false;
+        };
+        match build_position_from(sfen, rewound) {
+            Some(pos) => {
+                self.pos = pos;
+                true
+            }
+            None => false,
         }
     }
 
@@ -999,10 +1101,12 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     /// notice appropriate to its context. `disable_pv_interval` mirrors the
     /// reference `limits.disablePvInterval`: it forces the per-iteration PV
     /// interval to zero so every iteration prints, and is set only by `bench`.
+    /// `start_time` is the search's clock origin, `None` meaning now.
     fn prepare_coordinator_job(
         &mut self,
         mut limits: GoLimits,
         disable_pv_interval: bool,
+        start_time: Option<Instant>,
     ) -> Option<CoordinatorJob<W>> {
         // The reference's mutable global `NNUE::FV_SCALE`. Written at the start
         // of every search, so a `setoption` issued mid-search leaves the running
@@ -1016,7 +1120,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         if limits.depth.is_none() {
             let dl = self.options.spin("DepthLimit");
             if dl != 0 {
-                limits.depth = Some(dl as u32);
+                limits.depth = Some(dl as i32);
             }
         }
         if limits.nodes.is_none() {
@@ -1025,6 +1129,13 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
                 limits.nodes = Some(nl as u64);
             }
         }
+        // The reference tests these limits for nonzero, so a zero one, given
+        // on the `go` line or not, sets no limit; an explicit zero still wins
+        // over the option above.
+        limits.depth = limits.depth.filter(|&d| d != 0);
+        limits.nodes = limits.nodes.filter(|&n| n != 0);
+        limits.movetime = limits.movetime.filter(|&t| t != 0);
+        limits.mate = limits.mate.filter(|&m| m != 0);
 
         // The per-worker handles are resolved alongside `eval`, so a loaded
         // `eval` always has a network for every worker.
@@ -1034,7 +1145,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         // `go rtime`; a `TimeControl` is installed for those and for
         // `go movetime`, and is `None` otherwise.
         let us = self.pos.side_to_move();
-        let now = Instant::now();
+        let now = start_time.unwrap_or_else(Instant::now);
         let use_time_management = limits.mate.is_none()
             && limits.movetime.is_none()
             && limits.depth.is_none()
@@ -1045,10 +1156,10 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         // mapped onto a `movetime`-style bound. A bare or `infinite` `go mate`
         // carries no bound and runs until `stop`.
         let mate_budget = match limits.mate {
-            Some(m) if m != MATE_UNLIMITED_MS => Some(m as i64),
+            Some(m) if m != MATE_UNLIMITED_MS => Some(i64::from(m)),
             _ => None,
         };
-        let movetime = limits.movetime.map(|m| m as i64).or(mate_budget);
+        let movetime = limits.movetime.or(mate_budget);
 
         // Side-flip continuity: when the side to move alternated between the
         // last completed search and this one, the persisted previous scores are
@@ -1077,11 +1188,11 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             let mut prng = Prng::new(self.book_seed ^ 0xA5A5_5A5A_1234_5678);
             let tm = TimeManagement::init(
                 &TimeInput {
-                    time_us: time_opt.unwrap_or(0) as i64,
-                    inc_us: inc_opt.unwrap_or(0) as i64,
-                    byoyomi_us: limits.byoyomi.unwrap_or(0) as i64,
+                    time_us: time_opt.unwrap_or(0),
+                    inc_us: inc_opt.unwrap_or(0),
+                    byoyomi_us: limits.byoyomi.unwrap_or(0),
                     movetime: movetime.unwrap_or(0),
-                    rtime: limits.rtime.unwrap_or(0) as i64,
+                    rtime: limits.rtime.unwrap_or(0),
                     network_delay: self.options.spin("NetworkDelay"),
                     network_delay2: self.options.spin("NetworkDelay2"),
                     minimum_thinking_time: self.options.spin("MinimumThinkingTime"),
@@ -1120,7 +1231,8 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             time,
         };
         let depth = match limits.depth {
-            Some(d) => (d as i32).clamp(1, SEARCH_MAX_DEPTH),
+            // A negative depth runs no iteration, as in the reference.
+            Some(d) => d.min(SEARCH_MAX_DEPTH),
             None => SEARCH_MAX_DEPTH,
         };
 
@@ -1128,11 +1240,11 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         let multi_pv = (self.options.spin("MultiPV").max(1)) as usize;
 
         // The reference consults `get_best_thread` only for
-        // `MultiPV == 1 && !limits.depth && !limits.mate`, so a fixed-depth
-        // result stays reproducible, MultiPV shows every line, and a mate proof
-        // stays on the main worker's own line.
+        // `!limits.depth && !limits.mate`, whatever the MultiPV, so a
+        // fixed-depth result stays reproducible and a mate proof stays on the
+        // main worker's own line.
         let mate_mode = limits.mate.is_some();
-        let use_voting = limits.depth.is_none() && multi_pv == 1 && !mate_mode;
+        let use_voting = limits.depth.is_none() && !mate_mode;
 
         // A zero interval never suppresses, so every iteration prints.
         let consideration_mode = self.options.check("ConsiderationMode");
@@ -1163,6 +1275,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         // The main histories are lent take-and-return and reclaimed on join;
         // helper histories live in the pool threads.
         let tt = Arc::clone(&self.tt);
+        self.tt_written = true;
         let histories = self
             .histories
             .take()
@@ -1237,6 +1350,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
             control,
             stop,
             histories,
+            calls_cnt: self.calls_cnt,
             helper_slots,
             helper_shared,
             helper_networks,
@@ -1265,7 +1379,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     /// from the final `info nodes`. A position with no network loaded resigns and
     /// contributes 0 nodes.
     fn bench_run_one(&mut self, limits: GoLimits) -> io::Result<u64> {
-        let Some(job) = self.prepare_coordinator_job(limits, true) else {
+        let Some(job) = self.prepare_coordinator_job(limits, true, None) else {
             self.info_string("no eval network loaded; run isready")?;
             self.bestmove("resign")?;
             return Ok(0);
@@ -1274,6 +1388,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         // Bench uses fixed depth / nodes / movetime, so `time_state` is
         // irrelevant to it.
         self.histories = Some(outcome.histories);
+        self.calls_cnt = outcome.calls_cnt;
         Ok(outcome.nodes)
     }
 
@@ -1296,13 +1411,15 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
         };
 
         // The two option lines the reference emits, routed through the ordinary
-        // `setoption` path so the pool and TT resize exactly as a host
-        // `setoption` would.
+        // `setoption` path.
         self.handle_setoption("Threads", &config.threads.to_string())?;
         self.handle_setoption("USI_Hash", &config.tt_mb.to_string())?;
 
         // The `search_clear` the reference runs once before the positions — the
-        // identical starting state that makes two runs report equal nodes.
+        // identical starting state that makes two runs report equal nodes. In the
+        // reference that clear is a full `isready`, which is where the two
+        // options above take effect.
+        self.apply_resource_options();
         self.handle_usinewgame();
 
         // The reference times from after `search_clear`, excluding the clear.
@@ -1380,10 +1497,10 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
     /// time management and releases a held book reply, whose coordinator wait
     /// loop polls the same flag.
     fn handle_ponderhit(&mut self) -> io::Result<()> {
-        let stochastic = self.options.check("Stochastic_Ponder")
+        let stochastic = self.stochastic_ponder_rewound
             && self.search.as_ref().is_some_and(|a| a.ponder.is_some());
         if stochastic {
-            return self.stochastic_ponderhit();
+            return self.stochastic_ponderhit(Instant::now());
         }
 
         if let Some(active) = &self.search {
@@ -1399,11 +1516,16 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
     /// Stochastic_Ponder `ponderhit`. The rewound search's output is suppressed
     /// before it is stopped, so exactly one `bestmove` reaches the GUI.
-    fn stochastic_ponderhit(&mut self) -> io::Result<()> {
+    ///
+    /// The restarted search's clock starts at `arrival`, the instant the
+    /// `ponderhit` was received, as in the reference: the time spent stopping
+    /// the rewound search and restoring the position counts against the move.
+    fn stochastic_ponderhit(&mut self, arrival: Instant) -> io::Result<()> {
         if let Some(active) = &self.search {
             active.suppress.store(true, Ordering::Relaxed);
         }
         self.finish_search_join();
+        self.stochastic_ponder_rewound = false;
 
         let (sfen, moves) = self.last_position.clone();
         if let Some(pos) = build_position_from(&sfen, &moves) {
@@ -1412,7 +1534,7 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
         if let Some(mut go) = self.last_go.clone() {
             go.ponder = false;
-            return self.handle_go(go);
+            return self.handle_go(go, Some(arrival));
         }
         Ok(())
     }
@@ -1423,6 +1545,18 @@ impl<R: BufRead, W: Write + Send + 'static> UsiDriver<R, W> {
 
     fn handle_too_long(&mut self) -> io::Result<()> {
         self.info_string("command too long")
+    }
+
+    /// Print the reference's critical-error line and terminate the process
+    /// with status 1, as the reference does; a running search is abandoned.
+    /// The reference ends the message with an extra newline, so an empty line
+    /// follows it.
+    fn handle_critical_error(&mut self, command: &str, reason: &str) -> io::Result<()> {
+        self.info_string(&format!(
+            "CRITICAL ERROR: Command `{command}` failed. Reason: {reason}\n"
+        ))?;
+        let _ = self.lock_writer().flush();
+        std::process::exit(1);
     }
 }
 
@@ -1627,105 +1761,72 @@ fn emit_info_string<W: Write>(writer: &Arc<Mutex<W>>, msg: &str) {
     let _ = Formatter::new(&mut *guard).info_string(msg);
 }
 
-/// The keep-alive helper's stop request: a flag behind a mutex plus the condvar
-/// the helper sleeps on between polls, so that setting the flag wakes it at once
-/// instead of leaving it to finish out the poll it is in.
-#[derive(Default)]
-struct KeepAliveStop {
-    stopped: Mutex<bool>,
-    wake: Condvar,
-}
-
-impl KeepAliveStop {
-    fn lock(&self) -> MutexGuard<'_, bool> {
-        self.stopped.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Ask the helper to stop, and wake it if it is waiting out a poll.
-    fn request(&self) {
-        *self.lock() = true;
-        self.wake.notify_all();
-    }
-
-    /// Wait out one `poll` interval, or until a stop is requested. Returns
-    /// `true` if the full interval elapsed and `false` if it was cut short by a
-    /// stop. The interval is measured from this call, like a `sleep(poll)`, so a
-    /// loaded machine stretches it rather than making the next one shorter.
-    fn wait_one_poll(&self, poll: Duration) -> bool {
-        let deadline = Instant::now() + poll;
-        let mut stopped = self.lock();
-        while !*stopped {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                return true;
-            };
-            if left.is_zero() {
-                return true;
-            }
-            // A spurious wakeup just loops back to the deadline check.
-            stopped = self
-                .wake
-                .wait_timeout(stopped, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
-        false
-    }
-}
-
 /// A running keep-alive: a helper thread emitting a bare newline every
-/// [`KEEP_ALIVE_TICKS_PER_NEWLINE`] polls so a GUI does not time out while the
-/// heavy `isready` initialisation runs. Dropping the guard stops and joins the
-/// thread, so the join runs whether the wrapped work returns normally or bails
-/// out early via `?` — the reference's `SCOPE_EXIT`.
+/// `interval` so a GUI does not time out while the heavy `isready`
+/// initialisation runs. Dropping the guard stops and joins the thread, so the
+/// join runs whether the wrapped work returns normally or bails out early via
+/// `?` — the reference's `SCOPE_EXIT`.
 ///
-/// The reference's helper sleeps a flat 100 ms per poll and the join waits that
-/// out, so even a no-op `isready` takes about 100 ms to answer. Here the stop
-/// wakes the helper at once; while the heavy work runs on, the newline cadence
-/// is the same as the reference's.
+/// Start and stop are both signalled through a condition variable, so neither
+/// waits out a sleep: the helper's wait between newlines ends the moment the
+/// guard is dropped.
 ///
 /// Reference: `Engine::run_heavy_job`.
 struct KeepAlive {
-    /// Set on drop to stop the helper (`thread_end`).
-    stop: Arc<KeepAliveStop>,
+    /// The helper's flags, and the condition variable both sides wait on.
+    shared: Arc<(Mutex<KeepAliveFlags>, Condvar)>,
     /// `Some` until the guard is dropped; taken to join exactly once.
     handle: Option<JoinHandle<()>>,
+}
+
+/// The flags [`KeepAlive`] and its helper thread exchange under one mutex.
+#[derive(Default)]
+struct KeepAliveFlags {
+    /// Set by the helper once it runs (`thread_started`).
+    started: bool,
+    /// Set on drop to stop the helper (`thread_end`).
+    end: bool,
 }
 
 impl KeepAlive {
     /// Spawn the helper thread and block until it has actually started. The
     /// heavy work must run *after* this returns so a CPU-bound job cannot delay
-    /// the helper's first tick; the reference spins on a `thread_started` flag
+    /// the helper's first tick; the reference waits on a `thread_started` flag
     /// for the same reason.
-    fn spawn<W: Write + Send + 'static>(writer: Arc<Mutex<W>>, poll: Duration) -> Self {
-        let stop = Arc::new(KeepAliveStop::default());
-        let started = Arc::new(AtomicBool::new(false));
+    fn spawn<W: Write + Send + 'static>(writer: Arc<Mutex<W>>, interval: Duration) -> Self {
+        let shared = Arc::new((Mutex::new(KeepAliveFlags::default()), Condvar::new()));
         let handle = thread::spawn({
-            let stop = Arc::clone(&stop);
-            let started = Arc::clone(&started);
+            let shared = Arc::clone(&shared);
             move || {
-                started.store(true, Ordering::Release);
-                let mut count: u32 = 0;
-                // A stop during a poll ends the helper without a last tick.
-                while stop.wait_one_poll(poll) {
-                    count += 1;
-                    if count >= KEEP_ALIVE_TICKS_PER_NEWLINE {
-                        count = 0;
-                        // A bare newline with no `info string` prefix, holding
-                        // the output lock so it cannot interleave mid-line with
-                        // the heavy work's own output.
-                        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                        let _ = Formatter::new(&mut *guard).raw_line("");
+                let (lock, cv) = &*shared;
+                let mut flags = lock.lock().unwrap_or_else(|e| e.into_inner());
+                flags.started = true;
+                cv.notify_all();
+                loop {
+                    flags = cv
+                        .wait_timeout_while(flags, interval, |f| !f.end)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                    if flags.end {
+                        break;
                     }
+                    // A bare newline with no `info string` prefix, holding the
+                    // output lock so it cannot interleave mid-line with the
+                    // heavy work's own output.
+                    let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = Formatter::new(&mut *guard).raw_line("");
                 }
             }
         });
-        // Finer than the reference's 100 ms spin, so wrapping a fast `isready`
-        // adds no perceptible latency.
-        while !started.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_millis(1));
-        }
+        let (lock, cv) = &*shared;
+        drop(
+            cv.wait_while(lock.lock().unwrap_or_else(|e| e.into_inner()), |f| {
+                !f.started
+            })
+            .unwrap_or_else(|e| e.into_inner()),
+        );
         Self {
-            stop,
+            shared,
             handle: Some(handle),
         }
     }
@@ -1733,7 +1834,9 @@ impl KeepAlive {
 
 impl Drop for KeepAlive {
     fn drop(&mut self) {
-        self.stop.request();
+        let (lock, cv) = &*self.shared;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).end = true;
+        cv.notify_all();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -2124,22 +2227,19 @@ fn real_sysfs_options() -> SysfsOptions {
 /// * `none` → the default single all-threads node;
 /// * anything else → a custom node string via [`NumaConfig::from_string`].
 ///
-/// A custom string that fails to parse or yields zero nodes is an `Err`, where
-/// the reference reaches `std::exit(EXIT_FAILURE)`.
-fn numa_config_from_policy(policy: &str, opts: &SysfsOptions) -> Result<NumaConfig, String> {
-    let cfg = match policy {
+/// A custom string [`NumaConfig::from_string`] rejects is an `Err`.
+fn numa_config_from_policy(policy: &str, opts: &SysfsOptions) -> Result<NumaConfig, NumaError> {
+    Ok(match policy {
         "auto" | "system" => NumaConfig::from_sysfs(&DEFAULT_POLICY, true, opts),
         "hardware" => NumaConfig::from_sysfs(&DEFAULT_POLICY, false, opts),
         "none" => NumaConfig::default(),
-        other => {
-            let cfg = NumaConfig::from_string(other).map_err(|e| e.to_string())?;
-            if cfg.num_numa_nodes() == 0 {
-                return Err(format!("NumaPolicy `{other}` yields zero NUMA nodes"));
-            }
-            cfg
-        }
-    };
-    Ok(cfg)
+        other => NumaConfig::from_string(other)?,
+    })
+}
+
+/// The reference's reply to a rejected `NumaPolicy` value.
+fn numa_policy_invalid_message(policy: &str) -> String {
+    format!("NumaPolicy: invalid value '{policy}', keeping previous config.")
 }
 
 /// The worker → NUMA-node assignment for `requested` threads under `policy`.
@@ -2348,6 +2448,8 @@ struct CoordinatorJob<W: Write + Send + 'static> {
     control: SearchControl,
     stop: Arc<AtomicBool>,
     histories: WorkerHistories,
+    /// The main worker's `callsCnt` to resume.
+    calls_cnt: i32,
     helper_slots: Vec<Arc<HelperSlot>>,
     /// Each helper's node-shared correction / pawn tables, aligned with
     /// `helper_slots`. The main worker's own handle lives inside `histories`.
@@ -2392,11 +2494,13 @@ struct CoordinatorJob<W: Write + Send + 'static> {
 /// aggregate searched-node total (0 for the short-circuits, and the value
 /// `bench` accumulates), and the time-management carry-forward, whose third
 /// element is `None` for a short-circuited `go` — see
-/// [`SearchState::time_state`].
+/// [`SearchState::time_state`]. A short-circuit hands `calls_cnt` back as it
+/// came in, the search never having run.
 struct CoordinatedOutcome {
     histories: WorkerHistories,
     nodes: u64,
     time_state: Option<(Value, Value, Option<f64>)>,
+    calls_cnt: i32,
 }
 
 /// The time-management carry-forward for a SKIP_SEARCH short-circuit — a book
@@ -2420,6 +2524,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
         control,
         stop,
         histories,
+        calls_cnt,
         helper_slots,
         helper_shared,
         helper_networks,
@@ -2463,6 +2568,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
             histories,
             nodes: 0,
             time_state: skip_search_carry(),
+            calls_cnt,
         };
     }
     // Point and `None` rules yield `Move::win()`, emitted as the bare `win`
@@ -2478,6 +2584,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
             histories,
             nodes: 0,
             time_state: skip_search_carry(),
+            calls_cnt,
         };
     }
 
@@ -2512,6 +2619,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
                 histories,
                 nodes: 0,
                 time_state: skip_search_carry(),
+                calls_cnt,
             };
         }
     }
@@ -2551,6 +2659,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
     let net = search.network();
     let mut qs = QSearch::with_histories(net, &tt, histories);
     qs.set_control(control);
+    qs.set_calls_cnt(calls_cnt);
     qs.set_node_tally(Arc::clone(&node_slots), 0);
     qs.set_best_move_tally(Arc::clone(&bmc_slots), 0);
     qs.set_entering_king(entering_king);
@@ -2592,7 +2701,7 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
                 score: r.best.score,
                 pv0: r.best.pv[0],
                 pv_len: r.best.pv.len(),
-                completed_depth: r.completed_depth,
+                inexact: r.best.is_inexact(),
             })
             .collect();
         select_best_worker(&votes)
@@ -2602,13 +2711,10 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
     let chosen_result = &results[chosen];
     let mut best = chosen_result.best.clone();
     let mut pv_lines = chosen_result.pv_lines.clone();
-    let completed_depth = chosen_result.completed_depth.max(1);
+    let root_depth = chosen_result.root_depth;
     let ponder_candidate = chosen_result.ponder_candidate;
     // `uciPvSent` is the main worker's flag, whatever worker is chosen.
     let mut uci_pv_sent = results[0].uci_pv_sent;
-    // The reference's `pvIdx` after an aborted MultiPV loop, which the final
-    // `pv()` reads: the line that was being searched keeps its fail bound.
-    let aborted_pv_idx = results[0].aborted_pv_idx;
 
     // The `timeReduction` comes from the main worker even when the vote chose
     // another.
@@ -2636,8 +2742,9 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
     // that PV out so the GUI sees the score the decision was made on. The
     // reference judges the printed `uciScore` in centipawns, not the raw internal
     // score, and maps an unset one — an iteration aborted before any PV line was
-    // scored — to zero rather than resigning outright.
-    let resign_by_value = best.score != -VALUE_INFINITE && {
+    // scored — to zero rather than resigning outright. A bound is never resigned
+    // on.
+    let resign_by_value = best.score != -VALUE_INFINITE && !best.is_inexact() && {
         let resign_score = if best.uci_score == -VALUE_INFINITE {
             0
         } else {
@@ -2646,19 +2753,10 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
         to_cp(resign_score) <= -resign_value
     };
 
-    // Final PV output before `bestmove`. `pv_idx == lines.len()` makes every
-    // line exact, matching the reference `pv()` after the MultiPV loop
-    // (`worker.pvIdx == multiPV`).
+    // Final PV output before `bestmove`.
     if !uci_pv_sent || resign_by_value {
         let n = pv_lines.len();
-        let infos = qs.build_pv_infos(
-            &pos,
-            &pv_lines,
-            aborted_pv_idx.unwrap_or(n),
-            completed_depth,
-            n,
-            total_nodes,
-        );
+        let infos = qs.build_pv_infos(&pos, &pv_lines, root_depth, n, total_nodes);
         let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
         for info in &infos {
             let _ = write_pv_info(&mut *guard, info);
@@ -2683,9 +2781,11 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
         emit_bestmove(&writer, &bm);
     }
 
+    let calls_cnt = qs.calls_cnt();
     CoordinatedOutcome {
         histories: qs.into_histories(),
         nodes: total_nodes,
+        calls_cnt,
         time_state: Some((
             out_best_previous_score,
             out_best_previous_average_score,
@@ -2839,9 +2939,8 @@ mod tests {
 
     /// Block until the shared writer holds at least `want` bare newlines.
     ///
-    /// [`KeepAlive`] promises a newline every [`KEEP_ALIVE_TICKS_PER_NEWLINE`]
-    /// polls, not once per fixed span of wall time: on a loaded machine each
-    /// poll's sleep overruns, so the first newline can land arbitrarily late.
+    /// On a loaded machine the helper's timed wait overruns, so the first
+    /// newline can land arbitrarily later than its interval.
     /// Waiting for the newline rather than for a duration that ought to cover it
     /// keeps the wait honest — the deadline below is long enough that only a
     /// helper which never writes at all can trip it.
@@ -2879,8 +2978,7 @@ mod tests {
         // this also asserts no keep-alive newline interleaves mid-line.
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         {
-            // 1 ms poll → a bare newline every 50 polls.
-            let keep_alive = KeepAlive::spawn(Arc::clone(&writer), Duration::from_millis(1));
+            let keep_alive = KeepAlive::spawn(Arc::clone(&writer), Duration::from_millis(50));
             wait_for_bare_newlines(&writer, 1);
             // Wait for a newline after the job's line too, so the interleaving
             // check has helper output on both sides of it.
@@ -2914,9 +3012,8 @@ mod tests {
             // There is nothing to wait for here — the claim is that the helper
             // has *not* ticked — so the window before its first tick has to be
             // wide enough to survive the main thread being descheduled. The
-            // default cadence puts that tick 5 s out, and `Drop` wakes the
-            // helper at once rather than waiting out the poll.
-            let _keep_alive = KeepAlive::spawn(Arc::clone(&writer), KEEP_ALIVE_POLL_INTERVAL);
+            // default cadence puts that tick 5 s out.
+            let _keep_alive = KeepAlive::spawn(Arc::clone(&writer), KEEP_ALIVE_INTERVAL);
         }
         let out = shared_output(&writer);
         assert_eq!(
@@ -2927,52 +3024,28 @@ mod tests {
     }
 
     #[test]
-    fn keep_alive_drop_does_not_wait_out_the_poll() {
-        // A job that finishes at once must not pay for the poll interval: the
-        // stop wakes the helper. The poll is far longer than the bound, so only
-        // a drop that waits it out can trip the assertion.
+    fn keep_alive_starts_and_stops_without_waiting_out_a_sleep() {
+        // An hour-long interval: a helper that slept out its period before
+        // looking at the stop flag would hang the test outright. The bound is
+        // one-sided — any helper that sleeps even 50 ms per start or stop
+        // needs at least `CYCLES * 50ms` here however fast the machine is,
+        // while a condition-variable wake leaves the whole second as slack for
+        // a loaded machine.
+        const CYCLES: u32 = 20;
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let keep_alive = KeepAlive::spawn(Arc::clone(&writer), Duration::from_secs(30));
-        let t0 = Instant::now();
-        drop(keep_alive);
-        let took = t0.elapsed();
+        let started = Instant::now();
+        for _ in 0..CYCLES {
+            drop(KeepAlive::spawn(
+                Arc::clone(&writer),
+                Duration::from_secs(3600),
+            ));
+        }
+        let elapsed = started.elapsed();
         assert!(
-            took < Duration::from_secs(5),
-            "dropping the keep-alive waited {took:?} on a 30 s poll"
+            elapsed < CYCLES * Duration::from_millis(50),
+            "{CYCLES} keep-alive start/stop cycles took {elapsed:?}"
         );
         assert_eq!(bare_newline_count(&shared_output(&writer)), 0);
-    }
-
-    #[test]
-    fn keep_alive_emits_nothing_after_it_is_dropped() {
-        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let keep_alive = KeepAlive::spawn(Arc::clone(&writer), Duration::from_millis(1));
-        wait_for_bare_newlines(&writer, 1);
-        drop(keep_alive);
-        let at_drop = bare_newline_count(&shared_output(&writer));
-        // Many polls' worth of time: a helper that outlived the guard would tick.
-        thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            bare_newline_count(&shared_output(&writer)),
-            at_drop,
-            "the helper kept writing after the guard was dropped"
-        );
-    }
-
-    #[test]
-    fn keep_alive_wait_counts_whole_polls_and_stops_early() {
-        let stop = KeepAliveStop::default();
-        assert!(
-            stop.wait_one_poll(Duration::from_millis(5)),
-            "an uninterrupted poll runs its full interval"
-        );
-        stop.request();
-        let t0 = Instant::now();
-        assert!(
-            !stop.wait_one_poll(Duration::from_secs(30)),
-            "a requested stop ends the wait"
-        );
-        assert!(t0.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -2998,19 +3071,70 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn setoption_unknown_option_rejected() {
+    fn setoption_unknown_option_prints_the_reference_line() {
         assert_eq!(
-            run_with("setoption name Nonexistent value foo\nquit\n"),
-            "info string option Nonexistent rejected: unknown option\n"
+            run_with(
+                "setoption name Nonexistent value foo\n\
+                 setoption name No  Such Option value 1\n\
+                 setoption name USI_Hashh value 16\n\
+                 setoption name\n\
+                 quit\n"
+            ),
+            "No such option: Nonexistent\n\
+             No such option: No Such Option\n\
+             No such option: USI_Hashh\n\
+             No such option: \n"
         );
     }
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn setoption_bad_int_rejected() {
+    fn setoption_name_is_matched_case_insensitively() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut d = UsiDriver::new(&b""[..], Arc::clone(&output));
+        for line in [
+            "setoption name usi_hash value 16",
+            "setoption name THREADS value 1",
+        ] {
+            let Command::SetOption { name, value } = parse_line(line) else {
+                panic!("{line} parses as setoption");
+            };
+            d.handle_setoption(&name, &value).unwrap();
+        }
+        assert!(output.lock().unwrap().is_empty());
+        assert_eq!(d.options.spin("USI_Hash"), 16);
+        assert_eq!(d.options.value_text("USI_Hash"), Some("16"));
+        assert_eq!(d.options.spin("Threads"), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn setoption_rejected_spin_and_check_values_are_silent() {
         assert_eq!(
-            run_with("setoption name USI_Hash value not-a-number\nquit\n"),
-            "info string option USI_Hash rejected: value `not-a-number` is not an integer\n"
+            run_with(
+                "setoption name USI_Hash value not-a-number\n\
+                 setoption name USI_Hash value 0\n\
+                 setoption name USI_Hash value\n\
+                 setoption name USI_OwnBook value TRUE\n\
+                 quit\n"
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn setoption_unlisted_combo_value_prints_the_reference_message() {
+        assert_eq!(
+            run_with(
+                "setoption name EnteringKingRule value tryrule\n\
+                 setoption name EnteringKingRule value Nope\n\
+                 setoption name EnteringKingRule value\n\
+                 quit\n"
+            ),
+            "info string Error! : combo value not found, value = `Nope`, values = CSARule27 \
+             var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H \
+             var TryRule\n"
         );
     }
 
@@ -3116,23 +3240,126 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn setoption_threads_emits_allocation_line() {
-        // `NumaPolicy none` keeps binding off, so the line is deterministic
-        // across machines.
+    fn setoption_threads_and_hash_are_silent() {
         let out = run_with(
-            "setoption name NumaPolicy value none\n\
-             setoption name Threads value 1\n\
+            "setoption name Threads value 1\n\
              setoption name Threads value 4\n\
-             setoption name Threads value 2\n\
+             setoption name USI_Hash value 2\n\
              quit\n",
         );
-        assert!(out.contains("info string Using 1 thread\n"), "{out}");
-        assert!(out.contains("info string Using 4 threads\n"), "{out}");
-        assert!(out.contains("info string Using 2 threads\n"), "{out}");
-        assert!(
-            !out.contains("with NUMA node thread binding"),
-            "none policy must not bind: {out}"
-        );
+        assert_eq!(out, "");
+    }
+
+    fn idle_driver() -> UsiDriver<&'static [u8], Vec<u8>> {
+        UsiDriver::new(&b""[..], Arc::new(Mutex::new(Vec::new())))
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn resource_options_wait_for_apply() {
+        let mut d = idle_driver();
+        let before = d.pool.size();
+        d.handle_setoption("Threads", "1").unwrap();
+        d.handle_setoption("USI_Hash", "2").unwrap();
+        d.handle_setoption("NumaPolicy", "none").unwrap();
+        assert_eq!(d.pool.size(), before);
+        assert_eq!(d.tt.cluster_count(), 0);
+        assert_eq!(d.numa_policy, "auto");
+
+        assert!(d.apply_resource_options());
+        assert_eq!(d.pool.size(), 1);
+        assert_eq!(d.tt.cluster_count(), 2 * 32_768);
+        assert_eq!(d.numa_policy, "none");
+        assert!(d.pending_numa.is_none());
+        assert!(d.numa_bound.is_empty(), "none policy must not bind");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn unchanged_resource_options_rebuild_nothing() {
+        let mut d = idle_driver();
+        d.handle_setoption("Threads", "1").unwrap();
+        d.handle_setoption("USI_Hash", "2").unwrap();
+        d.apply_resource_options();
+        let shared = Arc::clone(&d.worker_shared[0]);
+        let table = d.tt.backing_ptr_addr();
+
+        assert!(!d.apply_resource_options());
+        assert!(Arc::ptr_eq(&shared, &d.worker_shared[0]), "pool rebuilt");
+        assert_eq!(d.tt.backing_ptr_addr(), table, "TT reallocated");
+        assert!(!d.hash_needs_reallocation);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn layout_change_reallocates_a_same_size_table() {
+        let mut d = idle_driver();
+        d.handle_setoption("Threads", "1").unwrap();
+        d.handle_setoption("USI_Hash", "2").unwrap();
+        d.apply_resource_options();
+
+        const K: u64 = 0x0123_4567_89ab_cdef;
+        let mark = |d: &UsiDriver<&'static [u8], Vec<u8>>| {
+            let generation = d.tt.generation();
+            let (_, _, w) = d.tt.probe(K, 0, |_| true);
+            w.write(
+                K,
+                5,
+                false,
+                attic_storage::Bound::Exact,
+                9,
+                0x1,
+                5,
+                generation,
+            );
+        };
+        let marked = |d: &UsiDriver<&'static [u8], Vec<u8>>| d.tt.probe(K, 0, |_| true).0;
+
+        mark(&d);
+        assert!(!d.apply_resource_options());
+        assert!(marked(&d), "unchanged options keep the table");
+
+        // A thread-count change forces the reallocation.
+        d.handle_setoption("Threads", "2").unwrap();
+        assert!(d.apply_resource_options());
+        assert_eq!(d.tt.cluster_count(), 2 * 32_768);
+        assert!(!marked(&d), "a Threads change reallocates the table");
+
+        // So does a NUMA layout applied at an unchanged thread count.
+        mark(&d);
+        d.handle_setoption("NumaPolicy", "none").unwrap();
+        assert!(d.pending_numa.is_some());
+        assert!(d.apply_resource_options());
+        assert_eq!(d.numa_policy, "none");
+        assert!(!marked(&d), "a NUMA layout change reallocates the table");
+        assert!(!d.hash_needs_reallocation);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn invalid_numa_policy_keeps_the_previous_layout() {
+        let mut d = idle_driver();
+        d.handle_setoption("Threads", "1").unwrap();
+        d.handle_setoption("USI_Hash", "1").unwrap();
+        d.handle_setoption("NumaPolicy", "0").unwrap();
+        d.apply_resource_options();
+        assert_eq!(d.numa_config.to_string(), "0");
+
+        // Rejected while nothing is pending: the live layout stays.
+        d.handle_setoption("NumaPolicy", "0,0").unwrap();
+        assert!(d.pending_numa.is_none());
+        d.apply_resource_options();
+        assert_eq!(d.numa_config.to_string(), "0");
+        assert_eq!(d.numa_policy, "0,0");
+        assert_eq!(d.numa_bound, [0], "a rejected custom value still binds");
+
+        // Rejected while a layout is pending: the pending one stays.
+        d.handle_setoption("NumaPolicy", "none").unwrap();
+        d.handle_setoption("NumaPolicy", "").unwrap();
+        assert!(d.pending_numa.is_some());
+        d.apply_resource_options();
+        assert_eq!(d.numa_config.num_numa_nodes(), 1);
+        assert!(!d.numa_config.is_custom_affinity());
     }
 
     /// A miniature 2-node sysfs fixture tree with no L3 cache dirs. The caller
@@ -3258,9 +3485,10 @@ mod tests {
         use attic_search::CorrChannel;
         use attic_state::{Color, Move, Piece, PieceKind, Square};
 
-        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+        let mut driver = idle_driver();
         driver.handle_setoption("Threads", "2").unwrap();
+        driver.handle_setoption("USI_Hash", "1").unwrap();
+        driver.apply_resource_options();
         assert_eq!(driver.pool.size(), 2);
 
         let shared = Arc::clone(&driver.worker_shared[0]);
@@ -3269,8 +3497,18 @@ mod tests {
         let sq = Square::new(4, 3).unwrap();
         let mv = Move::make(Square::new(4, 4).unwrap(), sq, pc);
         let fresh_pawn = shared.pawn_get(key, pc, sq);
+        let fresh_corr = shared.correction_get(key, Color::Black, CorrChannel::Pawn);
+        let plane = attic_search::ContinuationHistory::plane_index(false, false, pc, sq);
+        let fresh_cont = shared.continuation().get_at(plane, pc, sq);
+        let fresh_main = driver
+            .histories
+            .as_ref()
+            .unwrap()
+            .main
+            .get(Color::Black, mv);
         shared.pawn_update(key, pc, sq, 500);
         shared.correction_update(key, Color::Black, CorrChannel::Pawn, 500);
+        shared.continuation().update_at(plane, pc, sq, 500);
         driver
             .histories
             .as_mut()
@@ -3278,6 +3516,7 @@ mod tests {
             .main
             .update(Color::Black, mv, 500);
         assert_ne!(shared.pawn_get(key, pc, sq), fresh_pawn);
+        assert_ne!(shared.continuation().get_at(plane, pc, sq), fresh_cont);
 
         driver.handle_usinewgame();
 
@@ -3289,20 +3528,22 @@ mod tests {
         assert_eq!(shared.pawn_get(key, pc, sq), fresh_pawn);
         assert_eq!(
             shared.correction_get(key, Color::Black, CorrChannel::Pawn),
-            0
+            fresh_corr
         );
+        assert_eq!(shared.continuation().get_at(plane, pc, sq), fresh_cont);
         let h = driver.histories.as_ref().unwrap();
         assert!(Arc::ptr_eq(&h.shared, &shared));
-        assert_eq!(h.main.get(Color::Black, mv), 0);
+        assert_eq!(h.main.get(Color::Black, mv), fresh_main);
     }
 
     #[test]
     #[cfg_attr(miri, ignore)]
     fn usinewgame_after_a_threads_change_still_matches_the_pool() {
-        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+        let mut driver = idle_driver();
+        driver.handle_setoption("USI_Hash", "1").unwrap();
         for threads in ["3", "1", "2"] {
             driver.handle_setoption("Threads", threads).unwrap();
+            driver.apply_resource_options();
             let want: usize = threads.parse().unwrap();
             assert_eq!(driver.pool.size(), want);
             assert!(driver.pool_layout_is_current());
@@ -3358,6 +3599,40 @@ mod tests {
         assert_eq!(ws[0].thread_count(), 4);
     }
 
+    /// Workers bound to one node share one continuation history; workers bound
+    /// to different nodes do not.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn build_worker_shared_shares_continuation_history_per_node() {
+        use attic_state::{Color, Piece, PieceKind, Square};
+        let cfg = NumaConfig::from_string("0:1").unwrap();
+        let ws = build_worker_shared(&cfg, &[0, 1, 0, 1], 4);
+        let workers: Vec<WorkerHistories> = ws
+            .iter()
+            .map(|s| WorkerHistories::with_shared(Arc::clone(s)))
+            .collect();
+        let pc = Piece::new(PieceKind::Gold, Color::White);
+        let to = Square::new(2, 5).unwrap();
+        let plane = 17;
+        let init = workers[1].continuation().get_at(plane, pc, to);
+
+        workers[0].continuation().update_at(plane, pc, to, 5000);
+
+        let after = workers[0].continuation().get_at(plane, pc, to);
+        assert_ne!(after, init);
+        assert_eq!(
+            workers[2].continuation().get_at(plane, pc, to),
+            after,
+            "same node: the update is visible"
+        );
+        assert_eq!(
+            workers[1].continuation().get_at(plane, pc, to),
+            init,
+            "other node: the update is not visible"
+        );
+        assert_eq!(workers[3].continuation().get_at(plane, pc, to), init);
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn build_worker_shared_unbound_rounds_thread_count_up() {
@@ -3391,6 +3666,7 @@ mod tests {
         let handle = std::thread::spawn(|| SearchState {
             histories: WorkerHistories::new(),
             time_state: skip_search_carry(),
+            calls_cnt: 0,
         });
         driver.search = Some(ActiveSearch {
             handle,
@@ -3423,6 +3699,7 @@ mod tests {
         let handle = std::thread::spawn(|| SearchState {
             histories: WorkerHistories::new(),
             time_state: Some((10, 20, Some(1.25))),
+            calls_cnt: 0,
         });
         driver.search = Some(ActiveSearch {
             handle,
@@ -3837,5 +4114,236 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Apply `lines` as one override file and return what they printed.
+    fn apply_overrides(
+        driver: &mut UsiDriver<&[u8], Vec<u8>>,
+        output: &Arc<Mutex<Vec<u8>>>,
+        lines: &[&str],
+    ) -> String {
+        output.lock().unwrap().clear();
+        for line in lines {
+            driver.apply_override_line(line).unwrap();
+        }
+        String::from_utf8(output.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepted_override_fixes_the_option_and_rereads_silently() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+
+        let out = apply_overrides(&mut driver, &output, &["FV_SCALE=24"]);
+        assert_eq!(
+            out,
+            "info string engine option override. name = FV_SCALE , value = 24\n"
+        );
+        assert!(driver.options.is_fixed("FV_SCALE"));
+        assert_eq!(driver.options.spin("FV_SCALE"), 24);
+
+        let out = apply_overrides(&mut driver, &output, &["FV_SCALE 24"]);
+        assert_eq!(out, "", "re-reading the fixed value must be silent");
+
+        let out = apply_overrides(&mut driver, &output, &["FV_SCALE 20"]);
+        assert_eq!(
+            out,
+            "info string Error : engine option override rejected. name = FV_SCALE , value = 20\n"
+        );
+        assert_eq!(driver.options.spin("FV_SCALE"), 24);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejected_override_leaves_the_option_settable() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+
+        let out = apply_overrides(&mut driver, &output, &["FV_SCALE 999"]);
+        assert_eq!(
+            out,
+            "info string Error : engine option override rejected. name = FV_SCALE , value = 999\n"
+        );
+        assert!(!driver.options.is_fixed("FV_SCALE"));
+        assert_eq!(driver.options.spin("FV_SCALE"), 16);
+
+        driver.handle_setoption("FV_SCALE", "20").unwrap();
+        assert_eq!(driver.options.spin("FV_SCALE"), 20);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn override_diagnostics_are_info_strings() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+
+        let out = apply_overrides(
+            &mut driver,
+            &output,
+            &[
+                "# a comment",
+                "NoSuchOption 1",
+                "option name FV_SCALE type spin default 24 bogus",
+            ],
+        );
+        assert_eq!(
+            out,
+            "info string Error : option name not found : NoSuchOption\n\
+             info string Error : invalid option declaration : \
+             option name FV_SCALE type spin default 24 bogus\n"
+        );
+        assert!(!driver.options.is_fixed("FV_SCALE"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn string_override_keeps_spaces_and_maps_empty() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut driver = UsiDriver::new(&b""[..], Arc::clone(&output));
+
+        let out = apply_overrides(&mut driver, &output, &["BookDir = my book=dir"]);
+        assert_eq!(
+            out,
+            "info string engine option override. name = BookDir , value = my book=dir\n"
+        );
+        assert_eq!(driver.options.text("BookDir"), "my book=dir");
+
+        let out = apply_overrides(&mut driver, &output, &["EvalDir <empty>"]);
+        assert_eq!(
+            out,
+            "info string engine option override. name = EvalDir , value = <empty>\n"
+        );
+        assert_eq!(driver.options.text("EvalDir"), "");
+        let out = apply_overrides(&mut driver, &output, &["EvalDir <empty>"]);
+        assert_eq!(out, "");
+    }
+
+    /// An all-zero SFNN-1536 network file: every position evaluates to 0. Only
+    /// that shape can read it, so what stages it is gated on that shape.
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+    fn zero_network_bytes() -> Vec<u8> {
+        const ARCH: &str = "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-15](ClippedReLU[15](AffineTransform[15<-3072](InputSlice[3072(0:3072)]))))){LayerStack=9}";
+        fn leb128_zeros(out: &mut Vec<u8>, count: usize) {
+            out.extend_from_slice(b"COMPRESSED_LEB128");
+            out.extend_from_slice(&(count as u32).to_le_bytes());
+            out.resize(out.len() + count, 0);
+        }
+        let mut out = Vec::new();
+        for word in [0x7AF3_2F16u32, 0x3C20_3B32, ARCH.len() as u32] {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out.extend_from_slice(ARCH.as_bytes());
+        out.extend_from_slice(&0x5F13_4AB8u32.to_le_bytes());
+        leb128_zeros(&mut out, 1_536);
+        leb128_zeros(&mut out, 1_536 * 73_305);
+        for _ in 0..9 {
+            out.extend_from_slice(&0x6333_718Au32.to_le_bytes());
+            // Each layer's biases (`i32`) then weights (`i8`, padded input).
+            for (outputs, inputs) in [(16, 1_536), (32, 32), (1, 32)] {
+                out.resize(out.len() + outputs * 4 + outputs * inputs, 0);
+            }
+        }
+        out
+    }
+
+    /// Feed one USI line to `driver`'s handler for it.
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+    fn exec<R: BufRead>(driver: &mut UsiDriver<R, Vec<u8>>, line: &str) {
+        match parse_line(line) {
+            Command::SetOption { name, value } => driver.handle_setoption(&name, &value),
+            Command::IsReady => driver.handle_isready(),
+            Command::Position { sfen, moves } => driver.handle_position(sfen, &moves),
+            Command::Go(limits) => driver.handle_go(limits, None),
+            _ => panic!("no handler wired for {line:?}"),
+        }
+        .expect("a write to a Vec cannot fail");
+    }
+
+    /// The `time` field of every PV `info` line in `out`.
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+    fn pv_info_times(out: &str) -> Vec<u64> {
+        out.lines()
+            .filter(|l| l.starts_with("info depth "))
+            .map(|l| {
+                let mut tokens = l.split_whitespace().skip_while(|&t| t != "time");
+                tokens.next();
+                tokens
+                    .next()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or_else(|| panic!("PV info line without a time: {l:?}"))
+            })
+            .collect()
+    }
+
+    /// The search a Stochastic_Ponder `ponderhit` restarts keeps its clock from
+    /// the instant the `ponderhit` arrived, not from when the restart was
+    /// issued. The arrival is injected ten seconds in the past, so every PV line
+    /// of the restarted search reports at least that much elapsed time; a clock
+    /// started at the restart would report a few milliseconds.
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn stochastic_ponderhit_restart_clock_starts_at_arrival() {
+        let dir =
+            std::env::temp_dir().join(format!("driver-ponderhit-arrival-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("nn.bin"), zero_network_bytes()).expect("write nn.bin");
+
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut driver = UsiDriver::new(io::empty(), Arc::clone(&output));
+        for line in [
+            "setoption name Threads value 1",
+            &format!("setoption name EvalDir value {}", dir.display()),
+            "setoption name Stochastic_Ponder value true",
+            "setoption name PvInterval value 0",
+            "isready",
+            "position startpos moves 7g7f",
+            "go ponder btime 800 wtime 800",
+        ] {
+            exec(&mut driver, line);
+        }
+        assert!(
+            shared_output(&output).contains("readyok"),
+            "the synthetic network must load: {}",
+            shared_output(&output)
+        );
+        assert!(driver.stochastic_ponder_rewound);
+
+        // Retire the rewound search here, so every PV line written after the
+        // mark belongs to the restarted one.
+        if let Some(active) = &driver.search {
+            active.suppress.store(true, Ordering::Relaxed);
+        }
+        driver.finish_search_join();
+        let mark = shared_output(&output).len();
+
+        let arrival = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("the monotonic clock is past ten seconds");
+        driver.stochastic_ponderhit(arrival).expect("restart");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !shared_output(&output)[mark..].contains("bestmove") {
+            assert!(
+                Instant::now() < deadline,
+                "the restarted search must finish: {}",
+                shared_output(&output)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        driver.finish_search_join();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let out = shared_output(&output);
+        let times = pv_info_times(&out[mark..]);
+        assert!(
+            !times.is_empty(),
+            "the restarted search printed no PV: {out}"
+        );
+        assert!(
+            times.iter().all(|&t| t >= 10_000),
+            "every PV line must count from the ponderhit arrival: {times:?}\n{out}"
+        );
     }
 }
