@@ -41,24 +41,23 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_post_ft;
 
-// Excluded under `sfnn_halfkahm2_2304_15_64_progress8ek`, the two 1024 shapes
-// (`..._progress8kpabs`, `..._progress8ek`) and Sirius's threat shape: the post-FT chain there ends in
-// `affine_padded32` helpers that take a fixed `[u8; 32]`, and fc_1's output is 64
-// in those shapes. Upstream C++ takes a separate `kUsePackedTail` path for
-// exactly this case (`AVX512 && kHidden2Dims == 64`), which has no port here yet.
-// The target for the 2304 shape is Zen2, which has no AVX-512 at all, so nothing
-// is lost by not compiling it — write the packed-tail kernels before running
-// either 64-wide shape on an AVX-512 host.
-//
-// The threat shape on an AVX-512 host therefore runs the AVX2 kernels above, the same ones
-// an AVX2-only host runs: the AVX-512 arms are selected by the 1536 feature as well as by
-// the target features, and a build for any other shape falls through to the AVX2 arm.
+// The feature transformer and element-wise kernels support whole 512-bit
+// registers. The dense chains use avx512_post_ft for the 1536 shape and
+// avx512_packed_tail for the progress-based 1024 and 2304 shapes.
+// Sirius's threat shape still selects the AVX2 kernels.
 #[allow(dead_code)]
-#[cfg(all(target_arch = "x86_64", feature = "sfnn_halfkahm2_1536_15_32_k3k3"))]
+#[cfg(all(target_arch = "x86_64", feature = "sfnn", not(feature = "sfnn_threat")))]
 pub mod avx512;
 #[allow(dead_code)]
-#[cfg(all(target_arch = "x86_64", feature = "sfnn_halfkahm2_1536_15_32_k3k3"))]
+#[cfg(all(target_arch = "x86_64", feature = "sfnn_progress"))]
+pub mod avx512_packed_tail;
+#[allow(dead_code)]
+#[cfg(all(target_arch = "x86_64", feature = "sfnn", not(feature = "sfnn_threat")))]
 pub mod avx512_post_ft;
+// Index arithmetic only, so on every target: the network builds its group-major
+// copies from it, and its tests run where AVX-512 does not.
+#[cfg(feature = "sfnn_progress")]
+pub mod group_layout;
 
 /// Which kernel backend this build compiled into the forward pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,15 +75,16 @@ pub enum Backend {
 /// not. The eval-parity test reads this to catch a build that silently compiled
 /// scalar on a VNNI-capable host.
 ///
-/// Only the shape that has the AVX-512 kernels reports [`Backend::Avx512Vnni`]:
-/// every other shape, on the same target features, runs the AVX2 or scalar
-/// kernels and says so.
+/// The 1536 and progress-based SFNN shapes report [`Backend::Avx512Vnni`] on
+/// such a build. The threat shape uses AVX2, as do the ordinary NNUE shapes
+/// when AVX2 is enabled.
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
     target_feature = "avx512vnni",
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub const fn active_backend() -> Backend {
     Backend::Avx512Vnni
@@ -96,7 +96,8 @@ pub const fn active_backend() -> Backend {
     target_feature = "avx512f",
     target_feature = "avx512bw",
     target_feature = "avx512vnni",
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 )))]
 pub const fn active_backend() -> Backend {
     Backend::Scalar
@@ -104,13 +105,14 @@ pub const fn active_backend() -> Backend {
 
 /// Feature-transformer accumulate/update kernels, selected at compile time.
 ///
-/// The AVX-512 arm is the one shape that has the module. A build for any other
-/// shape on an AVX-512 target falls to the AVX2 arm below, which every shape has.
+/// The AVX-512 arm is the SFNN shapes'. A standard shape on an AVX-512 target
+/// falls to the AVX2 arm below, which every shape has.
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub mod transformer_kernel {
     use super::avx512;
@@ -157,8 +159,8 @@ pub mod transformer_kernel {
         unsafe { avx512::add_sub_sub_features(out, weights, added, removed_a, removed_b) }
     }
 
-    /// `dst = src + sum(added) - sum(removed)`. Copy then apply; the one-pass
-    /// AVX2 form is not ported to 512 bits.
+    /// `dst = src + sum(added) - sum(removed)` in one pass over the accumulator
+    /// half: the child-from-parent derive, without the copy.
     #[inline]
     pub fn derive_features(
         dst: &mut [i16],
@@ -167,9 +169,8 @@ pub mod transformer_kernel {
         added: &[FeatureIndex],
         removed: &[FeatureIndex],
     ) {
-        dst.copy_from_slice(src);
-        sub_features(dst, weights, removed);
-        add_features(dst, weights, added);
+        // SAFETY: see `add_features`.
+        unsafe { avx512::derive_features(dst, src, weights, added, removed) }
     }
 }
 
@@ -184,7 +185,8 @@ pub mod transformer_kernel {
     not(all(
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
     ))
 ))]
 pub mod transformer_kernel {
@@ -279,7 +281,8 @@ pub mod transformer_kernel {
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+    feature = "sfnn",
+    not(feature = "sfnn_threat")
 ))]
 pub mod post_ft_kernel {
     use super::{avx512_post_ft, scalar_post_ft};
@@ -375,7 +378,8 @@ pub mod post_ft_kernel {
     not(all(
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
     ))
 ))]
 pub mod post_ft_kernel {
@@ -491,15 +495,14 @@ mod tests {
 
     #[test]
     fn active_backend_follows_compile_time_target_features() {
-        // Only the shape that has the AVX-512 kernels reports the SIMD backend;
-        // every other shape runs the AVX2 or scalar kernels on the same target
-        // features, and says so.
+        // The SFNN shapes with VNNI kernels report the SIMD backend.
         let simd_build = cfg!(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
             target_feature = "avx512vnni",
-            feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+            feature = "sfnn",
+            not(feature = "sfnn_threat")
         ));
         let expected = if simd_build {
             Backend::Avx512Vnni
@@ -511,12 +514,13 @@ mod tests {
 
     // Only a `-C target-cpu=native` build promises the host's features; under a
     // fixed baseline (CI pins `x86-64-v3`) the scalar backend is correct on any
-    // CPU, a runner that happens to have AVX-512 VNNI included. The shape with
-    // the AVX-512 kernels is the one that must pick them up.
+    // CPU, a runner that happens to have AVX-512 VNNI included. The shapes with
+    // the AVX-512 kernels must pick them up.
     #[cfg(all(
         target_cpu_native,
         target_arch = "x86_64",
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3"
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
     ))]
     #[test]
     fn native_build_on_a_vnni_host_is_the_simd_build() {
