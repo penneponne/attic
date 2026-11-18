@@ -4166,7 +4166,10 @@ mod tests {
             "info string Error : engine option override rejected. name = FV_SCALE , value = 999\n"
         );
         assert!(!driver.options.is_fixed("FV_SCALE"));
-        assert_eq!(driver.options.spin("FV_SCALE"), 16);
+        assert_eq!(
+            driver.options.spin("FV_SCALE"),
+            attic_search::FV_SCALE_DEFAULT as i64
+        );
 
         driver.handle_setoption("FV_SCALE", "20").unwrap();
         assert_eq!(driver.options.spin("FV_SCALE"), 20);

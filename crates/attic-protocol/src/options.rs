@@ -997,7 +997,10 @@ mod tests {
     #[test]
     fn value_text_renders_each_type() {
         let s = OptionStore::new();
-        assert_eq!(s.value_text("FV_SCALE"), Some("16"));
+        assert_eq!(
+            s.value_text("FV_SCALE"),
+            Some(FV_SCALE_DEFAULT.to_string().as_str())
+        );
         assert_eq!(s.value_text("USI_Ponder"), Some("false"));
         assert_eq!(s.value_text("EvalDir"), Some("eval"));
         assert_eq!(s.value_text("EnteringKingRule"), Some("CSARule27"));
