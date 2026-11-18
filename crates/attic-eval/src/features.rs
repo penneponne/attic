@@ -34,7 +34,7 @@ const _: () = assert!(NUM_FEATURES == FE_END + 2 * SQ_NB);
 #[cfg(feature = "nnue_halfkp")]
 const _: () = assert!(NUM_FEATURES == SQ_NB * FE_END);
 
-/// A single active input-feature index into the `HalfKA_hm2` feature space.
+/// A single row index in the selected feature transformer.
 pub type FeatureIndex = u32;
 
 /// The feature-space origin the reference initialises empty piece slots to
@@ -92,18 +92,25 @@ const SQ_NB: usize = Square::COUNT;
 const E_KING: usize = FE_END + SQ_NB;
 
 /// Number of distinct mirrored king squares (files 1–5 × 9 ranks).
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 const SQ_K_COUNT: usize = 5 * 9;
 
-/// Total `HalfKA_hm2` feature dimension, kept equal to
+/// SFNN feature dimension, kept equal to
 /// [`crate::types::NUM_FEATURES`].
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 pub const FEATURE_DIMENSION: usize = SQ_K_COUNT * E_KING;
+#[cfg(feature = "sfnn_ka2")]
+pub const FEATURE_DIMENSION: usize = E_KING + 2 * SQ_NB;
 
 /// Maximum number of simultaneously active features (`PIECE_NUMBER_NB`). Every
 /// legal shogi position has exactly 40 pieces across board and hands.
-#[cfg(any(feature = "sfnn", feature = "nnue_kp", feature = "sym"))]
+#[cfg(all(
+    any(feature = "sfnn", feature = "nnue_kp", feature = "sym"),
+    not(feature = "sfnn_ka2")
+))]
 pub const MAX_ACTIVE_FEATURES: usize = 40;
+#[cfg(feature = "sfnn_ka2")]
+pub const MAX_ACTIVE_FEATURES: usize = 42;
 
 /// HalfKP stops at `PIECE_NUMBER_KING`.
 ///
@@ -139,7 +146,7 @@ pub(crate) fn from_persp(sq: Square, persp: Color) -> Square {
 
 /// The `hm` trigger: mirror when the (perspective-relative) king sits on files
 /// 6–9, i.e. file index `>= 5`. Matches the C++ `sq_k >= SQ_61` test.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 #[inline]
 fn needs_mirror(king_sq_persp: Square) -> bool {
     king_sq_persp.file() >= 5
@@ -212,7 +219,7 @@ pub(crate) fn hand_plane(kind: PieceKind, is_friend: bool) -> usize {
 }
 
 /// Combine the mirrored king code with a plane-adjusted piece code.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 #[inline]
 fn encode_feature(sq_k_code: usize, p_adj: usize) -> FeatureIndex {
     debug_assert!(sq_k_code < SQ_K_COUNT);
@@ -232,7 +239,7 @@ fn encode_feature(sq_k_code: usize, p_adj: usize) -> FeatureIndex {
     debug_assert!(idx < NUM_FEATURES);
     idx as FeatureIndex
 }
-#[cfg(any(feature = "nnue_kp", feature = "sym_kp"))]
+#[cfg(any(feature = "nnue_kp", feature = "sym_kp", feature = "sfnn_ka2"))]
 #[inline]
 fn encode_feature(_sq_k_code: usize, p_adj: usize) -> FeatureIndex {
     debug_assert!(p_adj < NUM_FEATURES);
@@ -241,7 +248,7 @@ fn encode_feature(_sq_k_code: usize, p_adj: usize) -> FeatureIndex {
 
 /// The king code pieces are crossed on, and whether the board is mirrored to
 /// keep that king on the left five files.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 fn king_code(pos: &Position, perspective: Color) -> (usize, bool) {
     let own = from_persp(king_square(pos, perspective), perspective);
     let mirror = needs_mirror(own);
@@ -254,7 +261,7 @@ fn king_code(pos: &Position, perspective: Color) -> (usize, bool) {
         false,
     )
 }
-#[cfg(any(feature = "nnue_kp", feature = "sym_kp"))]
+#[cfg(any(feature = "nnue_kp", feature = "sym_kp", feature = "sfnn_ka2"))]
 fn king_code(_pos: &Position, _perspective: Color) -> (usize, bool) {
     (0, false)
 }
@@ -265,11 +272,23 @@ fn king_code(_pos: &Position, _perspective: Color) -> (usize, bool) {
 /// Above the piece-code level because not every shape's king lands somewhere
 /// `encode_feature` can reach: Manaka's HalfKP points both kings at a padding
 /// row past the end of the crossed table, which is an index and not a plane.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 #[inline]
 fn king_feature(_is_friend: bool, sq_code: usize, sq_k_code: usize) -> Option<FeatureIndex> {
     Some(encode_feature(sq_k_code, FE_END + sq_code))
 }
+#[cfg(feature = "sfnn_ka2")]
+#[inline]
+fn king_feature(_is_friend: bool, sq_code: usize, _sq_k_code: usize) -> Option<FeatureIndex> {
+    Some((FE_END + sq_code) as FeatureIndex)
+}
+
+#[cfg(feature = "sfnn_ka2")]
+#[inline]
+fn ka2_side_king_feature(is_friend: bool, sq_code: usize) -> FeatureIndex {
+    (E_KING + if is_friend { 0 } else { SQ_NB } + sq_code) as FeatureIndex
+}
+
 #[cfg(any(feature = "nnue_kp", feature = "sym_kp"))]
 #[inline]
 fn king_feature(is_friend: bool, sq_code: usize, sq_k_code: usize) -> Option<FeatureIndex> {
@@ -293,7 +312,10 @@ fn king_feature(_is_friend: bool, _sq_code: usize, _sq_k_code: usize) -> Option<
 /// # Panics
 /// Panics if `color` has no king: every position fed to the evaluator must have
 /// both, as the reference's `pos.king_square` contract requires.
-#[cfg(any(test, not(any(feature = "nnue_kp", feature = "sym_kp"))))]
+#[cfg(any(
+    test,
+    not(any(feature = "nnue_kp", feature = "sym_kp", feature = "sfnn_ka2"))
+))]
 pub(crate) fn king_square(pos: &Position, color: Color) -> Square {
     pos.king_square(color)
         .unwrap_or_else(|| panic!("position has no {color:?} king"))
@@ -314,14 +336,14 @@ fn king_square_scan(pos: &Position, color: Color) -> Square {
     panic!("position has no {color:?} king");
 }
 
-/// Active `HalfKA_hm2` feature indices for one `perspective` of `pos`: one per
-/// board piece, one per held-piece instance, then `BONA_PIECE_ZERO` padding for
-/// every empty piece slot. Always exactly [`MAX_ACTIVE_FEATURES`] indices, each
+/// Active feature indices for one perspective: board pieces, held-piece
+/// instances and `BONA_PIECE_ZERO` padding for empty piece slots.
+/// K-A2 also emits one side-specific feature for each king. Always exactly [`MAX_ACTIVE_FEATURES`] indices, each
 /// `< FEATURE_DIMENSION`, with the padding features the only duplicates.
 ///
 /// The padding is load-bearing. The reference iterates a *fixed* 40 piece-number
 /// slots and initialises every unused one to `BONA_PIECE_ZERO`, so each absent
-/// piece contributes the feature `E_KING * sq_k_code + 0`. The accumulator sums
+/// piece contributes the zero feature in its bucket. The accumulator sums
 /// feature columns, so those repeated zero-features shift the result: omitting
 /// them diverges from ground truth on any sparse position.
 ///
@@ -386,6 +408,8 @@ fn scan_active(
             if let Some(feature) = king_feature(is_friend, sq_code, sq_k_code) {
                 emit(feature);
             }
+            #[cfg(feature = "sfnn_ka2")]
+            emit(ka2_side_king_feature(is_friend, sq_code));
             continue;
         }
         let p_adj = board_plane(piece.kind, piece.promoted, is_friend) + sq_code;
@@ -427,7 +451,11 @@ pub fn requires_full_refresh(mv: Move, perspective: Color) -> bool {
     // A KP index does not embed the own king at all (`king_code` is a constant
     // there and the kings are ordinary features of the shared king plane), so
     // there a king move is an add/sub like any other.
-    const INDEX_EMBEDS_KING: bool = !cfg!(any(feature = "nnue_kp", feature = "sym_kp"));
+    const INDEX_EMBEDS_KING: bool = !cfg!(any(
+        feature = "nnue_kp",
+        feature = "sym_kp",
+        feature = "sfnn_ka2"
+    ));
     if !INDEX_EMBEDS_KING || mv.is_drop() {
         return false;
     }
@@ -440,7 +468,8 @@ pub fn requires_full_refresh(mv: Move, perspective: Color) -> bool {
 /// is `bucket_base + offset` with the offset below this (`encode_feature` adds
 /// `p_adj < FE_END + 2 * SQ_NB` to a base that depends only on the own king).
 #[cfg(not(feature = "sym"))]
-const BUCKET_FEATURES: usize = FE_END + 2 * SQ_NB;
+const BUCKET_FEATURES: usize =
+    FE_END + 2 * SQ_NB + if cfg!(feature = "sfnn_ka2") { SQ_NB } else { 0 };
 #[cfg(not(feature = "sym"))]
 const BUCKET_WORDS: usize = BUCKET_FEATURES.div_ceil(64);
 #[cfg(not(feature = "sym"))]
@@ -688,10 +717,35 @@ impl Dirty {
             )),
         }
     }
+
+    #[inline(always)]
+    fn append_indices(
+        self,
+        persp: Color,
+        sq_k_code: usize,
+        mirror: bool,
+        indices: &mut [FeatureIndex; MAX_DIRTY_FEATURES],
+        count: &mut u8,
+    ) {
+        if let Some(index) = self.encode(persp, sq_k_code, mirror) {
+            indices[*count as usize] = index;
+            *count += 1;
+        }
+        #[cfg(feature = "sfnn_ka2")]
+        if let Dirty::Board { sq, piece } = self
+            && piece.kind == PieceKind::King
+        {
+            let sq = from_persp(sq, persp).index() as usize;
+            indices[*count as usize] = ka2_side_king_feature(piece.color == persp, sq);
+            *count += 1;
+        }
+    }
 }
 
-/// The add/sub feature delta for one perspective across a move. At most two
-/// columns change per side, so the lists are fixed two-slot arrays.
+// A K-A2 king capture changes the two king indices and the captured piece.
+const MAX_DIRTY_FEATURES: usize = if cfg!(feature = "sfnn_ka2") { 3 } else { 2 };
+
+/// The add/sub feature delta for one perspective across a move.
 ///
 /// Plain data, written field by field and read back field by field at the same
 /// width. It used to be built zero-initialised, counted in `usize`s, wrapped in
@@ -702,8 +756,8 @@ impl Dirty {
 /// loads).
 #[derive(Clone, Copy)]
 pub struct PerspectiveDelta {
-    removed: [FeatureIndex; 2],
-    added: [FeatureIndex; 2],
+    removed: [FeatureIndex; MAX_DIRTY_FEATURES],
+    added: [FeatureIndex; MAX_DIRTY_FEATURES],
     n_removed: u8,
     n_added: u8,
     /// This perspective's own king moved: no add/sub delta exists and its half
@@ -714,8 +768,8 @@ pub struct PerspectiveDelta {
 impl PerspectiveDelta {
     /// The marker for a half that is rebuilt rather than updated.
     const REBUILD: PerspectiveDelta = PerspectiveDelta {
-        removed: [0; 2],
-        added: [0; 2],
+        removed: [0; MAX_DIRTY_FEATURES],
+        added: [0; MAX_DIRTY_FEATURES],
         n_removed: 0,
         n_added: 0,
         rebuild: true,
@@ -880,8 +934,8 @@ impl MoveDelta {
         let (sq_k_code, mirror) = king_code(pos, persp);
 
         let mut pd = PerspectiveDelta {
-            removed: [0; 2],
-            added: [0; 2],
+            removed: [0; MAX_DIRTY_FEATURES],
+            added: [0; MAX_DIRTY_FEATURES],
             n_removed: 0,
             n_added: 0,
             rebuild: false,
@@ -890,16 +944,10 @@ impl MoveDelta {
         // Only HalfKP produces one, and only for a king -- whose move that
         // space answers with a full refresh anyway.
         for d in removed {
-            if let Some(index) = d.encode(persp, sq_k_code, mirror) {
-                pd.removed[pd.n_removed as usize] = index;
-                pd.n_removed += 1;
-            }
+            d.append_indices(persp, sq_k_code, mirror, &mut pd.removed, &mut pd.n_removed);
         }
         for d in added {
-            if let Some(index) = d.encode(persp, sq_k_code, mirror) {
-                pd.added[pd.n_added as usize] = index;
-                pd.n_added += 1;
-            }
+            d.append_indices(persp, sq_k_code, mirror, &mut pd.added, &mut pd.n_added);
         }
         pd
     }
@@ -926,8 +974,10 @@ mod tests {
     /// How many distinct feature values those twelve pieces produce. The two
     /// that move between shapes are the kings: YaneuraOu's HalfKP has no row
     /// for them at all, and Manaka's HalfKP sends both to the same padding row.
-    #[cfg(not(any(feature = "nnue_halfkp", feature = "sym_halfkp")))]
+    #[cfg(not(any(feature = "nnue_halfkp", feature = "sym_halfkp", feature = "sfnn_ka2")))]
     const DISTINCT_REAL_IN_DROP_HEAVY: usize = 12;
+    #[cfg(feature = "sfnn_ka2")]
+    const DISTINCT_REAL_IN_DROP_HEAVY: usize = 14;
     #[cfg(feature = "nnue_halfkp")]
     const DISTINCT_REAL_IN_DROP_HEAVY: usize = 10;
     #[cfg(feature = "sym_halfkp")]
@@ -961,7 +1011,7 @@ mod tests {
     /// Only `HalfKA_hm2` canonicalizes on the mirror; K, P and HalfKP all
     /// number the squares absolutely, so a mirrored position is simply a
     /// different position to them.
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
     fn mirror_position(pos: &Position) -> Position {
         let mut mirrored = Position::empty();
         for index in 0..Square::COUNT as u8 {
@@ -1007,7 +1057,7 @@ mod tests {
         // `FEATURE_DIMENSION` is the crossed `HalfKA_hm2` table, so only that
         // shape's `NUM_FEATURES` is it. The other three size their tables in
         // `types.rs`, and `num_features_matches_shape` there pins each one.
-        #[cfg(feature = "sfnn")]
+        #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
         {
             assert_eq!(FEATURE_DIMENSION, NUM_FEATURES);
             assert_eq!(FEATURE_DIMENSION, SQ_K_COUNT * E_KING);
@@ -1033,7 +1083,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
     #[test]
     fn startpos_both_kings_share_one_plane() {
         let pos = parse_sfen(STARTPOS).unwrap();
@@ -1164,7 +1214,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
     #[test]
     fn mirror_property_preserves_feature_set() {
         // Both kings sit off the centre file, so the mirror flag flips between
@@ -1241,7 +1291,11 @@ mod tests {
         let king_move = parse_usi_move("5i5h", &pos).unwrap();
         // Where the index embeds the own king the mover's half rebuilds; where
         // it does not (KP) a king move is an ordinary add/sub.
-        let embeds_king = !cfg!(any(feature = "nnue_kp", feature = "sym_kp"));
+        let embeds_king = !cfg!(any(
+            feature = "nnue_kp",
+            feature = "sym_kp",
+            feature = "sfnn_ka2"
+        ));
         assert_eq!(requires_full_refresh(king_move, Color::Black), embeds_king);
         assert!(!requires_full_refresh(king_move, Color::White));
 
@@ -1463,7 +1517,7 @@ mod tests {
         assert!(removed.is_empty() && added.is_empty());
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
     #[test]
     fn mirror_property_needs_mirror_flag_actually_flips() {
         // Exactly one of the two positions must trigger the mirror path for each

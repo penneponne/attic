@@ -88,8 +88,7 @@ pub use tokens::{
 pub use scale::{FV_SCALE_DEFAULT, fv_scale, set_fv_scale};
 pub use types::{NUM_FEATURES, NnueError};
 
-// `FEATURE_DIMENSION` is HalfKA_hm2's own product and means nothing to the
-// shapes that do not cross a piece on a mirrored king.
+// The SFNN feature-space size, before transformation.
 #[cfg(feature = "sfnn")]
 pub use features::FEATURE_DIMENSION;
 

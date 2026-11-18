@@ -1033,7 +1033,11 @@ mod tests {
         // Only where the index embeds the own king; a KP king move is a delta.
         assert_eq!(
             delta.half(Color::Black).is_none(),
-            !cfg!(any(feature = "nnue_kp", feature = "sym_kp")),
+            !cfg!(any(
+                feature = "nnue_kp",
+                feature = "sym_kp",
+                feature = "sfnn_ka2"
+            )),
             "this fixture must exercise the rebuild arm",
         );
         pos.do_move(mv);
@@ -1161,7 +1165,11 @@ mod tests {
             }
         }
 
-        if cfg!(any(feature = "nnue_kp", feature = "sym_kp")) {
+        if cfg!(any(
+            feature = "nnue_kp",
+            feature = "sym_kp",
+            feature = "sfnn_ka2"
+        )) {
             // A KP index embeds no king: its king moves are plain deltas (the
             // drift check above still covered them) and never reach the cache.
             assert_eq!(king_moves, 0, "a KP king move must be a delta");

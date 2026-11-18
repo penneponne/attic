@@ -33,6 +33,8 @@ use attic_storage::{ArenaLayout, ArenaSlice, LargePageArena, Section};
 // shape, so it is in no list at all.
 #[cfg(not(any(
     feature = "sfnn_halfkahm2_1536_15_32_k3k3",
+    feature = "sfnn_ka2_2048_8_64_progress8x",
+    feature = "sfnn_ka2_4096_8_64_progress8x",
     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
     feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
     feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
@@ -50,6 +52,7 @@ compile_error!(
     "select a network: --features sfnn_halfkahm2_1536_15_32_k3k3, \
      sfnn_halfkahm2_1024_15_64_progress8kpabs, sfnn_halfkahm2_1024_15_64_progress8ek, \
      sfnn_halfkahm2_2304_15_64_progress8ek, sfnn_halfkahm2_threat_1024_15_64_8gp, \
+     sfnn_ka2_2048_8_64_progress8x, sfnn_ka2_4096_8_64_progress8x, \
      nnue_kp_256x2_32_32, nnue_kp_128x2_32_32, nnue_halfkp_256x2_32_32, nnue_halfkp_128x2_32_32, nnue_halfkp_768x2_16_64, one of the synn_* shapes listed in \
      attic-eval's Cargo.toml, hce_material_17 or hce_mobility_107_57"
 );
@@ -60,6 +63,25 @@ compile_error!(
     "`threat_force_refresh` rebuilds the accumulator of the threat shape \
      (sfnn_halfkahm2_threat_1024_15_64_8gp); no other shape has a threat update to check"
 );
+
+#[cfg(all(
+    feature = "sfnn_ka2",
+    any(
+        all(
+            feature = "sfnn_ka2_2048_8_64_progress8x",
+            feature = "sfnn_ka2_4096_8_64_progress8x"
+        ),
+        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
+        feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
+        feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
+        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_threat",
+        feature = "nnue_standard",
+        feature = "sym",
+        feature = "hce"
+    )
+))]
+compile_error!("the K-A2 SFNN shapes must be selected individually");
 
 #[cfg(all(
     feature = "sfnn_halfkahm2_1536_15_32_k3k3",
@@ -228,18 +250,24 @@ pub const HIDDEN_SIZE: usize = 2_304;
 pub const HIDDEN_SIZE: usize = 256;
 #[cfg(any(feature = "nnue_kp_128x2_32_32", feature = "nnue_halfkp_128x2_32_32"))]
 pub const HIDDEN_SIZE: usize = 128;
+#[cfg(feature = "sfnn_ka2_2048_8_64_progress8x")]
+pub const HIDDEN_SIZE: usize = 2_048;
+#[cfg(feature = "sfnn_ka2_4096_8_64_progress8x")]
+pub const HIDDEN_SIZE: usize = 4_096;
 #[cfg(feature = "nnue_halfkp_768x2_16_64")]
 pub const HIDDEN_SIZE: usize = 768;
 
 /// Rows of the feature transformer.
 ///
-/// The SFNN shapes share `FeatureSet<HalfKA_hm2<Side::kFriend>>`; the
-/// standard ones are YaneuraOu's own `FeatureSet<K, P>` and
+/// Most SFNN shapes use `FeatureSet<HalfKA_hm2<Side::kFriend>>`. The
+/// TuyouraOu shapes use `FeatureSet<K, A2>`. The standard ones are YaneuraOu's own `FeatureSet<K, P>` and
 /// `HalfKP<Side::kFriend>`. HalfKP is 125,388 here and not the 125,389 Manaka
 /// trains against: Manaka appends a padding row and points both kings at it so
 /// that every position keeps forty tokens, and YaneuraOu never numbered one.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 pub const NUM_FEATURES: usize = 73_305;
+#[cfg(feature = "sfnn_ka2")]
+pub const NUM_FEATURES: usize = 1_791;
 #[cfg(any(feature = "nnue_kp", feature = "sym_kp"))]
 pub const NUM_FEATURES: usize = 1_710;
 #[cfg(feature = "nnue_halfkp")]
@@ -261,10 +289,13 @@ pub const NUM_FEATURES: usize = crate::hce::DIM;
 /// Dense stacks in the file. The SFNN shapes bucket — by king rank at 1536, by
 /// game progress at 1024 and 2304 — and the standard ones have one stack and no
 /// bucket.
-#[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
+#[cfg(all(
+    feature = "sfnn",
+    not(any(feature = "sfnn_threat", feature = "sfnn_ka2"))
+))]
 pub const LAYER_STACKS: usize = 9;
 /// Sirius's file carries eight stacks, picked by an integer game-phase sum.
-#[cfg(feature = "sfnn_threat")]
+#[cfg(any(feature = "sfnn_threat", feature = "sfnn_ka2"))]
 pub const LAYER_STACKS: usize = 8;
 
 /// Rows of the threat block: 216,720 edge rows (36 blocks of the 6,020 attacks a piece
@@ -278,9 +309,11 @@ pub const THREAT_ROWS: usize = 0;
 pub const LAYER_STACKS: usize = 1;
 
 // fc_0 has 16 outputs: the 16th feeds only the post-fc_2 shortcut, while the
-// first 15 feed both activations.
-#[cfg(feature = "sfnn")]
+// first 15 feed both activations. K-A2 feeds all eight outputs to both.
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
 pub const HIDDEN1_DIMS: usize = 15;
+#[cfg(feature = "sfnn_ka2")]
+pub const HIDDEN1_DIMS: usize = 8;
 // The standard shapes have no shortcut, so all of fc_0's outputs go on to the
 // next layer and there is no split for this to be one side of. Thirty-two wide
 // in every one but the 768, whose name says sixteen.
@@ -308,7 +341,7 @@ pub const HIDDEN2_DIMS: usize = 32;
 pub const HIDDEN2_DIMS: usize = 64;
 
 #[cfg(feature = "sfnn")]
-pub const FC_0_OUTPUT_DIMS: usize = HIDDEN1_DIMS + 1;
+pub const FC_0_OUTPUT_DIMS: usize = HIDDEN1_DIMS + (!cfg!(feature = "sfnn_ka2") as usize);
 #[cfg(feature = "nnue_standard")]
 pub const FC_0_OUTPUT_DIMS: usize = HIDDEN1_DIMS;
 
@@ -399,9 +432,9 @@ impl NetDims {
     /// unaffected by it.
     pub const HALFKA2304: NetDims = NetDims {
         hidden_size: 2_304,
-        num_features: NUM_FEATURES,
-        layer_stacks: LAYER_STACKS,
-        fc_0_output: FC_0_OUTPUT_DIMS,
+        num_features: 73_305,
+        layer_stacks: 9,
+        fc_0_output: 16,
         fc_0_padded_input: 2_304,
         fc_1_output: 64,
         fc_1_padded_input: FC_1_PADDED_INPUT_DIMS,
@@ -1132,8 +1165,10 @@ mod tests {
     /// 1548 and crosses nothing; HalfKP crosses with all 81 king squares.
     #[test]
     fn num_features_matches_shape() {
-        #[cfg(feature = "sfnn")]
+        #[cfg(all(feature = "sfnn", not(feature = "sfnn_ka2")))]
         assert_eq!(NUM_FEATURES, 5 * 9 * 1629);
+        #[cfg(feature = "sfnn_ka2")]
+        assert_eq!(NUM_FEATURES, 1791);
         #[cfg(feature = "nnue_kp")]
         assert_eq!(NUM_FEATURES, 1_710);
         #[cfg(feature = "nnue_halfkp")]
@@ -1144,9 +1179,12 @@ mod tests {
     /// stack and pick nothing at run time.
     #[test]
     fn layer_stacks_matches_shape() {
-        #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
+        #[cfg(all(
+            feature = "sfnn",
+            not(any(feature = "sfnn_threat", feature = "sfnn_ka2"))
+        ))]
         assert_eq!(LAYER_STACKS, 9);
-        #[cfg(feature = "sfnn_threat")]
+        #[cfg(any(feature = "sfnn_threat", feature = "sfnn_ka2"))]
         assert_eq!(LAYER_STACKS, 8);
         #[cfg(feature = "nnue_standard")]
         assert_eq!(LAYER_STACKS, 1);
@@ -1160,7 +1198,10 @@ mod tests {
         assert_eq!(FC_0_PADDED_INPUT_DIMS, FC_0_INPUT_DIMS);
         #[cfg(feature = "sfnn")]
         {
-            assert_eq!(FC_0_OUTPUT_DIMS, 16);
+            assert_eq!(
+                FC_0_OUTPUT_DIMS,
+                if cfg!(feature = "sfnn_ka2") { 8 } else { 16 }
+            );
             assert_eq!(FC_0_INPUT_DIMS, HIDDEN_SIZE);
         }
         #[cfg(feature = "nnue_standard")]
@@ -1182,7 +1223,10 @@ mod tests {
         assert_eq!(FC_1_OUTPUT_DIMS, HIDDEN2_DIMS);
         assert_eq!(FC_1_PADDED_INPUT_DIMS, 32);
         #[cfg(feature = "sfnn")]
-        assert_eq!(FC_1_INPUT_DIMS, 30);
+        assert_eq!(
+            FC_1_INPUT_DIMS,
+            if cfg!(feature = "sfnn_ka2") { 16 } else { 30 }
+        );
         #[cfg(all(feature = "nnue_standard", not(feature = "nnue_halfkp_768x2_16_64")))]
         assert_eq!(FC_1_INPUT_DIMS, 32);
         #[cfg(feature = "nnue_halfkp_768x2_16_64")]
@@ -1258,6 +1302,30 @@ mod tests {
         assert_same_dims(&NetDims::STANDARD, &NetDims::HALFKA1024);
         #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
         assert_same_dims(&NetDims::STANDARD, &NetDims::HALFKA2304);
+    }
+
+    #[cfg(feature = "sfnn_ka2")]
+    #[test]
+    fn tuyoura_dimensions_match_the_distributed_layout() {
+        let (width, stack_bytes) = if cfg!(feature = "sfnn_ka2_2048_8_64_progress8x") {
+            (2048, 18_792)
+        } else {
+            (4096, 35_176)
+        };
+        let expected = NetDims {
+            hidden_size: width,
+            num_features: 1_791,
+            layer_stacks: 8,
+            fc_0_output: 8,
+            fc_0_padded_input: width,
+            fc_1_output: 64,
+            fc_1_padded_input: 32,
+            fc_2_output: 1,
+            fc_2_padded_input: 64,
+            threat_rows: 0,
+        };
+        assert_same_dims(&NetDims::STANDARD, &expected);
+        assert_eq!(dense_stack_bytes(&NetDims::STANDARD), stack_bytes);
     }
 
     /// One layer stack as it sits in a plain file, hash word included: the
