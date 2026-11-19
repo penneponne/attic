@@ -100,6 +100,60 @@ pub unsafe fn ewm_one_perspective(half: &[i16], out: &mut [u8]) {
     unsafe { ewm_one_perspective_ptr(half.as_ptr(), out.as_mut_ptr()) }
 }
 
+/// [`ewm_one_perspective_ptr`] for an accumulator at the scale the file holds: both lanes
+/// clamped to `[0, 127]`, and `(a * b) >> 7` taken as `mulhi(a << 8, b << 1)`. The largest
+/// operands are `127 << 8 = 32512` and `127 << 1 = 254`, both positive in `i16`, and the
+/// largest product `127 * 127 >> 7 = 126` fits a byte, so `packus` does not saturate.
+///
+/// # Safety
+/// The running CPU must support `avx2`. `half` must be readable for `HIDDEN_SIZE` `i16` and
+/// `out` writable for `EWM_HALF` bytes.
+#[cfg(feature = "sfnn_threat")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn ewm_one_perspective_file_scale_ptr(half: *const i16, out: *mut u8) {
+    let zero = _mm256_setzero_si256();
+    let cap = _mm256_set1_epi16(127);
+
+    let chunks = EWM_HALF / (I16_LANES * 2);
+    for chunk in 0..chunks {
+        let off = chunk * I16_LANES * 2;
+
+        let mut packed = [zero; 2];
+        for (i, slot) in packed.iter_mut().enumerate() {
+            let at = off + i * I16_LANES;
+            // SAFETY: at + I16_LANES <= EWM_HALF, and the second load is EWM_HALF further
+            // into a buffer of 2 * EWM_HALF i16.
+            let (in0, in1) = unsafe {
+                (
+                    _mm256_loadu_si256(half.add(at).cast::<__m256i>()),
+                    _mm256_loadu_si256(half.add(at + EWM_HALF).cast::<__m256i>()),
+                )
+            };
+            let sum0 = _mm256_max_epi16(_mm256_min_epi16(in0, cap), zero);
+            let sum1 = _mm256_max_epi16(_mm256_min_epi16(in1, cap), zero);
+            *slot = _mm256_mulhi_epi16(_mm256_slli_epi16::<8>(sum0), _mm256_slli_epi16::<1>(sum1));
+        }
+
+        // SAFETY: guarded by this function's own target_feature.
+        let bytes = unsafe { fix_pack_lanes(_mm256_packus_epi16(packed[0], packed[1])) };
+        // SAFETY: off + 32 <= EWM_HALF keeps the 32-byte store in range.
+        unsafe { _mm256_storeu_si256(out.add(off).cast::<__m256i>(), bytes) };
+    }
+}
+
+/// [`ewm_one_perspective_file_scale_ptr`] over slices.
+///
+/// # Safety
+/// The running CPU must support `avx2`.
+#[cfg(feature = "sfnn_threat")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn ewm_one_perspective_file_scale(half: &[i16], out: &mut [u8]) {
+    assert_eq!(half.len(), HIDDEN_SIZE);
+    assert_eq!(out.len(), EWM_HALF);
+    // SAFETY: lengths checked above; caller guarantees avx2.
+    unsafe { ewm_one_perspective_file_scale_ptr(half.as_ptr(), out.as_mut_ptr()) }
+}
+
 /// `output = clamp(input >> WEIGHT_SCALE_BITS, 0, 127)`.
 ///
 /// Processes 32 `i32` per iteration (a full 32-byte store), then 16, so the
@@ -726,6 +780,49 @@ mod tests {
             // SAFETY: guarded by `require_avx2!`.
             unsafe { ewm_one_perspective(&half, &mut got) };
             assert_eq!(want, got, "seed {seed}");
+        }
+    }
+
+    /// The file-scale transform against the scalar one: every pair of accumulator values
+    /// across the clamp at 127 (and well beyond it, and below zero) must agree.
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn ewm_file_scale_matches_scalar() {
+        require_avx2!();
+        for seed in [0i16, 13, 101] {
+            let half = seeded_half(seed);
+            let mut want = vec![0u8; EWM_HALF];
+            let mut got = vec![0u8; EWM_HALF];
+            scalar_post_ft::ewm_one_perspective_file_scale(&half, &mut want);
+            // SAFETY: guarded by `require_avx2!`.
+            unsafe { ewm_one_perspective_file_scale(&half, &mut got) };
+            assert_eq!(want, got, "seed {seed}");
+        }
+        // Every (a, b) in 0..=130 x 0..=130, plus the extremes, laid across the lanes.
+        let mut half = vec![0i16; HIDDEN_SIZE];
+        let mut pairs = Vec::new();
+        for a in -3i16..=130 {
+            for b in -3i16..=130 {
+                pairs.push((a, b));
+            }
+        }
+        pairs.extend([
+            (i16::MAX, i16::MAX),
+            (i16::MIN, i16::MAX),
+            (i16::MAX, i16::MIN),
+        ]);
+        for chunk in pairs.chunks(EWM_HALF) {
+            half.fill(0);
+            for (j, &(a, b)) in chunk.iter().enumerate() {
+                half[j] = a;
+                half[j + EWM_HALF] = b;
+            }
+            let mut want = vec![0u8; EWM_HALF];
+            let mut got = vec![0u8; EWM_HALF];
+            scalar_post_ft::ewm_one_perspective_file_scale(&half, &mut want);
+            // SAFETY: guarded by `require_avx2!`.
+            unsafe { ewm_one_perspective_file_scale(&half, &mut got) };
+            assert_eq!(want, got);
         }
     }
 

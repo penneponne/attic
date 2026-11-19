@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Attach the builds to the release of this existing tag (e.g. v9.80.0). Empty = build only"
+        description: "Attach the builds to the release of this existing tag (e.g. v9.96.0). Empty = build only"
         required: false
         default: ""
 
@@ -215,7 +215,7 @@ jobs:
           - These are plain `--release` builds, not the PGO build the README describes, which is a few percent faster.
           - x86-64 builds target x86-64-v3 (AVX2). There is no AVX-512 build.
           - The arm64 builds have no NEON kernels and run the scalar path.
-          - Only the Linux x86-64 and KP256 combination has been checked against YaneuraOu 9.80; see the README for how far.
+          - Only the Linux x86-64 builds of the KP256 and HalfKP256 shapes have been checked against YaneuraOu V9.96 (the other shapes were last checked against V9.80, or shielune's fork); see the README for how far.
           - Verify a download with the matching `.sha256` file.
           EOF
       - uses: softprops/action-gh-release@v2

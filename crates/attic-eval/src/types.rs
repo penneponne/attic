@@ -36,6 +36,7 @@ use attic_storage::{ArenaLayout, ArenaSlice, LargePageArena, Section};
     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
     feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
     feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+    feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
     feature = "nnue_kp_256x2_32_32",
     feature = "nnue_kp_128x2_32_32",
     feature = "nnue_halfkp_256x2_32_32",
@@ -48,9 +49,16 @@ use attic_storage::{ArenaLayout, ArenaSlice, LargePageArena, Section};
 compile_error!(
     "select a network: --features sfnn_halfkahm2_1536_15_32_k3k3, \
      sfnn_halfkahm2_1024_15_64_progress8kpabs, sfnn_halfkahm2_1024_15_64_progress8ek, \
-     sfnn_halfkahm2_2304_15_64_progress8ek, nnue_kp_256x2_32_32, nnue_kp_128x2_32_32, \
-     nnue_halfkp_256x2_32_32, nnue_halfkp_128x2_32_32, nnue_halfkp_768x2_16_64, one of the synn_* shapes listed in \
+     sfnn_halfkahm2_2304_15_64_progress8ek, sfnn_halfkahm2_threat_1024_15_64_8gp, \
+     nnue_kp_256x2_32_32, nnue_kp_128x2_32_32, nnue_halfkp_256x2_32_32, nnue_halfkp_128x2_32_32, nnue_halfkp_768x2_16_64, one of the synn_* shapes listed in \
      attic-eval's Cargo.toml, hce_material_17 or hce_mobility_107_57"
+);
+
+// A checking build of the threat shape's update; any other shape has nothing for it to force.
+#[cfg(all(feature = "threat_force_refresh", not(feature = "sfnn_threat")))]
+compile_error!(
+    "`threat_force_refresh` rebuilds the accumulator of the threat shape \
+     (sfnn_halfkahm2_threat_1024_15_64_8gp); no other shape has a threat update to check"
 );
 
 #[cfg(all(
@@ -59,6 +67,7 @@ compile_error!(
         feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
         feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
         feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
         feature = "nnue_halfkp_256x2_32_32",
@@ -75,6 +84,7 @@ compile_error!("sfnn_halfkahm2_1536_15_32_k3k3 is a different network from the r
     any(
         feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
         feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
         feature = "nnue_halfkp_256x2_32_32",
@@ -92,6 +102,7 @@ compile_error!(
     feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
     any(
         feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
         feature = "nnue_halfkp_256x2_32_32",
@@ -108,6 +119,7 @@ compile_error!(
 #[cfg(all(
     feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
     any(
+        feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
         feature = "nnue_halfkp_256x2_32_32",
@@ -119,6 +131,22 @@ compile_error!(
 ))]
 compile_error!(
     "sfnn_halfkahm2_2304_15_64_progress8ek is a different network from the rest; select one"
+);
+
+#[cfg(all(
+    feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
+    any(
+        feature = "nnue_kp_256x2_32_32",
+        feature = "nnue_kp_128x2_32_32",
+        feature = "nnue_halfkp_256x2_32_32",
+        feature = "nnue_halfkp_128x2_32_32",
+        feature = "nnue_halfkp_768x2_16_64",
+        feature = "sym",
+        feature = "hce"
+    )
+))]
+compile_error!(
+    "sfnn_halfkahm2_threat_1024_15_64_8gp is a different network from the rest; select one"
 );
 
 #[cfg(all(
@@ -190,7 +218,8 @@ compile_error!("the two hand-crafted evaluations have different weights; select 
 pub const HIDDEN_SIZE: usize = 1_536;
 #[cfg(any(
     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
-    feature = "sfnn_halfkahm2_1024_15_64_progress8ek"
+    feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
+    feature = "sfnn_halfkahm2_threat_1024_15_64_8gp"
 ))]
 pub const HIDDEN_SIZE: usize = 1_024;
 #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
@@ -232,8 +261,19 @@ pub const NUM_FEATURES: usize = crate::hce::DIM;
 /// Dense stacks in the file. The SFNN shapes bucket — by king rank at 1536, by
 /// game progress at 1024 and 2304 — and the standard ones have one stack and no
 /// bucket.
-#[cfg(feature = "sfnn")]
+#[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
 pub const LAYER_STACKS: usize = 9;
+/// Sirius's file carries eight stacks, picked by an integer game-phase sum.
+#[cfg(feature = "sfnn_threat")]
+pub const LAYER_STACKS: usize = 8;
+
+/// Rows of the threat block: 216,720 edge rows (36 blocks of the 6,020 attacks a piece
+/// can make on an empty board) and 1,296 king-count rows. Only the threat shape has them.
+#[cfg(feature = "sfnn_threat")]
+pub const THREAT_ROWS: usize = 218_016;
+/// Only a shape that has a `NetDims` reads it; the Manaka and hand-crafted ones have none.
+#[cfg(not(any(feature = "sfnn_threat", feature = "sym", feature = "hce")))]
+pub const THREAT_ROWS: usize = 0;
 #[cfg(feature = "nnue_standard")]
 pub const LAYER_STACKS: usize = 1;
 
@@ -260,7 +300,11 @@ pub const HIDDEN1_DIMS: usize = 16;
     feature = "nnue_halfkp_128x2_32_32"
 ))]
 pub const HIDDEN2_DIMS: usize = 32;
-#[cfg(any(feature = "sfnn_progress", feature = "nnue_halfkp_768x2_16_64"))]
+#[cfg(any(
+    feature = "sfnn_progress",
+    feature = "sfnn_threat",
+    feature = "nnue_halfkp_768x2_16_64"
+))]
 pub const HIDDEN2_DIMS: usize = 64;
 
 #[cfg(feature = "sfnn")]
@@ -322,6 +366,9 @@ pub struct NetDims {
     pub fc_1_padded_input: usize,
     pub fc_2_output: usize,
     pub fc_2_padded_input: usize,
+    /// Rows of the int8 threat block that follows the feature transformer; zero in every
+    /// shape but the threat one.
+    pub threat_rows: usize,
 }
 
 #[cfg(not(any(feature = "sym", feature = "hce")))]
@@ -338,6 +385,7 @@ impl NetDims {
         fc_1_padded_input: FC_1_PADDED_INPUT_DIMS,
         fc_2_output: FC_2_OUTPUT_DIMS,
         fc_2_padded_input: FC_2_PADDED_INPUT_DIMS,
+        threat_rows: THREAT_ROWS,
     };
 
     /// `SFNN_HALFKAHM2_2304_15_64` — the shape NAGISA V4 ships
@@ -359,6 +407,7 @@ impl NetDims {
         fc_1_padded_input: FC_1_PADDED_INPUT_DIMS,
         fc_2_output: FC_2_OUTPUT_DIMS,
         fc_2_padded_input: 64,
+        threat_rows: 0,
     };
 
     /// `SFNN_HALFKAHM2_1024_15_64` — the shape NAGISA V3 ships
@@ -384,6 +433,27 @@ impl NetDims {
         fc_1_padded_input: 32,
         fc_2_output: 1,
         fc_2_padded_input: 64,
+        threat_rows: 0,
+    };
+
+    /// `SFNN_HALFKAHM2_THREAT_1024_15_64_8GP` -- Sirius's network
+    /// (`ModelType=SFNNWithoutPsqt;Features=HalfKA2_hm(Friend)[73305->1024x2],Threat=218016,
+    /// ThreatProfile=23,Network=SFNN_HALFKA2_1024_15_64_8GP`).
+    ///
+    /// [`HALFKA1024`](NetDims::HALFKA1024) with eight stacks instead of nine and the threat
+    /// block after the transformer: 218,016 rows of 1,024 `i8`. Spelled out in literals for
+    /// the reason the others are.
+    pub const SIRIUS_THREAT1024: NetDims = NetDims {
+        hidden_size: 1_024,
+        num_features: 73_305,
+        layer_stacks: 8,
+        fc_0_output: 16,
+        fc_0_padded_input: 1_024,
+        fc_1_output: 64,
+        fc_1_padded_input: 32,
+        fc_2_output: 1,
+        fc_2_padded_input: 64,
+        threat_rows: 218_016,
     };
 
     /// `NNUE_kp_256x2_32_32` — YaneuraOu's `FeatureSet<K, P>` at 256.
@@ -407,6 +477,7 @@ impl NetDims {
         fc_1_padded_input: 32,
         fc_2_output: 1,
         fc_2_padded_input: 32,
+        threat_rows: 0,
     };
 
     /// `NNUE_halfkp_256x2_32_32` — `HalfKP<Side::kFriend>` at 256.
@@ -425,6 +496,7 @@ impl NetDims {
         fc_1_padded_input: 32,
         fc_2_output: 1,
         fc_2_padded_input: 32,
+        threat_rows: 0,
     };
 
     /// `NNUE_halfkp_128x2_32_32` — [`HALFKP256`](NetDims::HALFKP256) at half the
@@ -443,6 +515,7 @@ impl NetDims {
         fc_1_padded_input: 32,
         fc_2_output: 1,
         fc_2_padded_input: 32,
+        threat_rows: 0,
     };
 
     /// `NNUE_halfkp_768x2_16_64` — the AobaNNUE shape.
@@ -463,11 +536,13 @@ impl NetDims {
         fc_1_padded_input: 32,
         fc_2_output: 1,
         fc_2_padded_input: 64,
+        threat_rows: 0,
     };
 }
 
 #[cfg(not(any(feature = "sym", feature = "hce")))]
-/// The arena [`Section`]s of one layer stack's six FC arrays.
+/// The arena [`Section`]s of one layer stack's six FC arrays, and for the
+/// 64-wide SFNN shapes the group-major copies of its weights.
 #[derive(Clone, Copy, Debug)]
 struct StackSections {
     fc_0_biases: Section<i32>,
@@ -475,6 +550,18 @@ struct StackSections {
     fc_1_biases: Section<i32>,
     fc_1_weights: Section<i8>,
     fc_2_biases: Section<i32>,
+    fc_2_weights: Section<i8>,
+    #[cfg(feature = "sfnn_progress")]
+    grouped: GroupedSections,
+}
+
+/// Where one stack's weights live in the order the AVX-512 chain of the 64-wide
+/// shapes reads them. See [`crate::simd::group_layout`].
+#[cfg(feature = "sfnn_progress")]
+#[derive(Clone, Copy, Debug)]
+struct GroupedSections {
+    fc_0_weights: Section<i8>,
+    fc_1_weights: Section<i8>,
     fc_2_weights: Section<i8>,
 }
 
@@ -485,6 +572,9 @@ struct StackSections {
 struct NetLayout {
     ft_biases: Section<i16>,
     ft_weights: Section<i16>,
+    /// The int8 threat block, `threat_rows * hidden_size`, in file-row order.
+    #[cfg(feature = "sfnn_threat")]
+    threat_weights: Section<i8>,
     stacks: Vec<StackSections>,
     total_bytes: usize,
 }
@@ -497,6 +587,8 @@ impl NetLayout {
         let mut l = ArenaLayout::new();
         let ft_biases = l.reserve::<i16>(dims.hidden_size);
         let ft_weights = l.reserve::<i16>(dims.hidden_size * dims.num_features);
+        #[cfg(feature = "sfnn_threat")]
+        let threat_weights = l.reserve::<i8>(dims.hidden_size * dims.threat_rows);
         let mut stacks = Vec::with_capacity(dims.layer_stacks);
         for _ in 0..dims.layer_stacks {
             stacks.push(StackSections {
@@ -506,11 +598,21 @@ impl NetLayout {
                 fc_1_weights: l.reserve::<i8>(dims.fc_1_output * dims.fc_1_padded_input),
                 fc_2_biases: l.reserve::<i32>(dims.fc_2_output),
                 fc_2_weights: l.reserve::<i8>(dims.fc_2_output * dims.fc_2_padded_input),
+                // The same sizes again, for the copies `NnueNetworkBuilder::build`
+                // fills from the arrays above.
+                #[cfg(feature = "sfnn_progress")]
+                grouped: GroupedSections {
+                    fc_0_weights: l.reserve::<i8>(dims.fc_0_output * dims.fc_0_padded_input),
+                    fc_1_weights: l.reserve::<i8>(dims.fc_1_output * dims.fc_1_padded_input),
+                    fc_2_weights: l.reserve::<i8>(dims.fc_2_output * dims.fc_2_padded_input),
+                },
             });
         }
         Self {
             ft_biases,
             ft_weights,
+            #[cfg(feature = "sfnn_threat")]
+            threat_weights,
             stacks,
             total_bytes: l.total_bytes(),
         }
@@ -567,6 +669,29 @@ pub struct NetworkStack {
     /// debug builds.
     #[cfg(feature = "nnue_standard")]
     pub(crate) fc_kernels: FcKernels,
+    /// The three weight arrays above again, in the group-major order the
+    /// AVX-512 chain of the 64-wide SFNN shapes reads (see
+    /// [`crate::simd::group_layout`]). Filled from them once, by
+    /// `NnueNetworkBuilder::build`, so they are a function of the arrays and
+    /// hold nothing of their own. Every build of these shapes carries them, so
+    /// that the relayout is tested on hosts without AVX-512, but only that
+    /// chain reads them.
+    #[cfg(feature = "sfnn_progress")]
+    #[allow(dead_code)]
+    pub(crate) grouped: GroupedWeights,
+}
+
+/// One stack's weights in group-major order: see [`NetworkStack::grouped`].
+#[cfg(feature = "sfnn_progress")]
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct GroupedWeights {
+    /// fc_0, [`by_group`](crate::simd::group_layout::by_group).
+    pub(crate) fc_0: ArenaSlice<i8>,
+    /// fc_1, [`by_group`](crate::simd::group_layout::by_group).
+    pub(crate) fc_1: ArenaSlice<i8>,
+    /// fc_2, [`fc_2_packed`](crate::simd::group_layout::fc_2_packed).
+    pub(crate) fc_2: ArenaSlice<i8>,
 }
 
 #[cfg(not(any(feature = "sym", feature = "hce")))]
@@ -672,6 +797,40 @@ impl NetworkStack {
             fc_2_weights,
             #[cfg(feature = "nnue_standard")]
             fc_kernels,
+            #[cfg(feature = "sfnn_progress")]
+            grouped: GroupedWeights {
+                fc_0: arena.view(sections.grouped.fc_0_weights),
+                fc_1: arena.view(sections.grouped.fc_1_weights),
+                fc_2: arena.view(sections.grouped.fc_2_weights),
+            },
+        }
+    }
+}
+
+/// Fill the group-major copies of every stack's weights from the row-major
+/// arrays the loader (or a test) wrote. The one place they are written.
+///
+/// Only the layers whose sizes are this build's are copied. A hand-built
+/// network of other sizes keeps zeros there, and the AVX-512 chain refuses it
+/// on the same sizes before it reads anything.
+#[cfg(feature = "sfnn_progress")]
+fn fill_grouped(arena: &mut LargePageArena, layout: &NetLayout) {
+    use crate::simd::group_layout::{by_group, fc_2_packed};
+
+    for s in &layout.stacks {
+        if s.fc_0_weights.len() == FC_0_OUTPUT_DIMS * FC_0_PADDED_INPUT_DIMS {
+            let row_major = arena.slice_mut(s.fc_0_weights).to_vec();
+            let out = arena.slice_mut(s.grouped.fc_0_weights);
+            by_group(&row_major, FC_0_OUTPUT_DIMS, FC_0_PADDED_INPUT_DIMS, out);
+        }
+        if s.fc_1_weights.len() == FC_1_OUTPUT_DIMS * FC_1_PADDED_INPUT_DIMS {
+            let row_major = arena.slice_mut(s.fc_1_weights).to_vec();
+            let out = arena.slice_mut(s.grouped.fc_1_weights);
+            by_group(&row_major, FC_1_OUTPUT_DIMS, FC_1_PADDED_INPUT_DIMS, out);
+        }
+        if s.fc_2_weights.len() == FC_2_OUTPUT_DIMS * FC_2_PADDED_INPUT_DIMS {
+            let row_major = arena.slice_mut(s.fc_2_weights).to_vec();
+            fc_2_packed(&row_major, arena.slice_mut(s.grouped.fc_2_weights));
         }
     }
 }
@@ -681,9 +840,11 @@ impl NetworkStack {
 ///
 /// Every parameter array — `ft_biases`, the ~215 MiB `ft_weights`, and all nine
 /// stacks' FC weights and biases — lives in **one** large-page allocation, as
-/// the reference's `make_unique_large_page<NnueNetworks>` does. The public
-/// parameter fields are 64-byte-aligned views into it, meeting what the AVX-512
-/// kernels require.
+/// the reference's long-lived network copy does. The loader decodes the file
+/// straight into this allocation, so there is no intermediate network buffer;
+/// the reference reads into an ordinary aligned temporary instead, keeping
+/// short-lived allocations off large pages. The public parameter fields are
+/// 64-byte-aligned views into it, meeting what the AVX-512 kernels require.
 #[derive(Debug)]
 pub struct NnueNetwork {
     pub header: NetHeader,
@@ -693,6 +854,10 @@ pub struct NnueNetwork {
     layout: NetLayout,
     pub ft_biases: ArenaSlice<i16>,
     pub ft_weights: ArenaSlice<i16>,
+    /// The threat block: `THREAT_ROWS` rows of `HIDDEN_SIZE` signed bytes, in the order of
+    /// the file's rows (which is the order `crate::threat` numbers them in).
+    #[cfg(feature = "sfnn_threat")]
+    pub threat_weights: ArenaSlice<i8>,
     pub stacks: Vec<NetworkStack>,
     pub sha256: [u8; 32],
 }
@@ -709,6 +874,8 @@ impl NnueNetwork {
     ) -> Self {
         let ft_biases = arena.view(layout.ft_biases);
         let ft_weights = arena.view(layout.ft_weights);
+        #[cfg(feature = "sfnn_threat")]
+        let threat_weights = arena.view(layout.threat_weights);
         let stacks = layout
             .stacks
             .iter()
@@ -720,6 +887,8 @@ impl NnueNetwork {
             layout,
             ft_biases,
             ft_weights,
+            #[cfg(feature = "sfnn_threat")]
+            threat_weights,
             stacks,
             sha256,
         }
@@ -785,6 +954,12 @@ impl NnueNetworkBuilder {
         self.arena.slice_mut(self.layout.ft_weights)
     }
 
+    /// Mutable view of the threat block (`threat_rows * hidden_size` i8).
+    #[cfg(feature = "sfnn_threat")]
+    pub fn threat_weights_mut(&mut self) -> &mut [i8] {
+        self.arena.slice_mut(self.layout.threat_weights)
+    }
+
     /// Mutable view of stack `i`'s `fc_0_biases`.
     pub fn fc_0_biases_mut(&mut self, i: usize) -> &mut [i32] {
         self.arena.slice_mut(self.layout.stacks[i].fc_0_biases)
@@ -815,8 +990,13 @@ impl NnueNetworkBuilder {
         self.layout.stacks.len()
     }
 
-    /// Consume the filled arena and produce the network, copying nothing.
-    pub fn build(self) -> NnueNetwork {
+    /// Consume the filled arena and produce the network. Nothing is copied but,
+    /// in the 64-wide SFNN shapes, the dense weights into their group-major
+    /// order (a few hundred kilobytes).
+    #[cfg_attr(not(feature = "sfnn_progress"), allow(unused_mut))]
+    pub fn build(mut self) -> NnueNetwork {
+        #[cfg(feature = "sfnn_progress")]
+        fill_grouped(&mut self.arena, &self.layout);
         NnueNetwork::from_arena(self.header, self.arena, self.layout, self.sha256)
     }
 }
@@ -1016,7 +1196,8 @@ mod tests {
         assert_eq!(HIDDEN_SIZE, 1536);
         #[cfg(any(
             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
-            feature = "sfnn_halfkahm2_1024_15_64_progress8ek"
+            feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
+            feature = "sfnn_halfkahm2_threat_1024_15_64_8gp"
         ))]
         assert_eq!(HIDDEN_SIZE, 1024);
         #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
@@ -1046,8 +1227,10 @@ mod tests {
     /// stack and pick nothing at run time.
     #[test]
     fn layer_stacks_matches_shape() {
-        #[cfg(feature = "sfnn")]
+        #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
         assert_eq!(LAYER_STACKS, 9);
+        #[cfg(feature = "sfnn_threat")]
+        assert_eq!(LAYER_STACKS, 8);
         #[cfg(feature = "nnue_standard")]
         assert_eq!(LAYER_STACKS, 1);
     }
@@ -1088,13 +1271,21 @@ mod tests {
         #[cfg(feature = "nnue_halfkp_768x2_16_64")]
         assert_eq!(FC_1_INPUT_DIMS, 16);
 
-        #[cfg(not(any(feature = "sfnn_progress", feature = "nnue_halfkp_768x2_16_64")))]
+        #[cfg(not(any(
+            feature = "sfnn_progress",
+            feature = "sfnn_threat",
+            feature = "nnue_halfkp_768x2_16_64"
+        )))]
         assert_eq!(HIDDEN2_DIMS, 32);
-        #[cfg(any(feature = "sfnn_progress", feature = "nnue_halfkp_768x2_16_64"))]
+        #[cfg(any(
+            feature = "sfnn_progress",
+            feature = "sfnn_threat",
+            feature = "nnue_halfkp_768x2_16_64"
+        ))]
         assert_eq!(HIDDEN2_DIMS, 64);
     }
 
-    #[cfg(feature = "sfnn_progress")]
+    #[cfg(any(feature = "sfnn_progress", feature = "sfnn_threat"))]
     fn assert_same_dims(a: &NetDims, b: &NetDims) {
         assert_eq!(a.hidden_size, b.hidden_size, "hidden_size");
         assert_eq!(a.num_features, b.num_features, "num_features");
@@ -1114,6 +1305,24 @@ mod tests {
             a.fc_2_padded_input, b.fc_2_padded_input,
             "fc_2_padded_input"
         );
+        assert_eq!(a.threat_rows, b.threat_rows, "threat_rows");
+    }
+
+    /// The threat shape's constants and its spelled-out [`NetDims::SIRIUS_THREAT1024`] say
+    /// the same thing, for the reason the progress shapes' do.
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn standard_dims_equal_the_named_dims_of_the_threat_shape() {
+        assert_same_dims(&NetDims::STANDARD, &NetDims::SIRIUS_THREAT1024);
+    }
+
+    /// Sirius's stack is the 1024 stack, 18,824 bytes, and the file holds eight of them.
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn threat_dense_stacks_are_the_1024_ones() {
+        assert_eq!(dense_stack_bytes(&NetDims::SIRIUS_THREAT1024), 18_824);
+        assert_eq!(NetDims::SIRIUS_THREAT1024.layer_stacks, 8);
+        assert_eq!(NetDims::SIRIUS_THREAT1024.threat_rows, 216_720 + 1_296);
     }
 
     /// The constants a progress build is compiled against and its spelled-out
@@ -1136,7 +1345,7 @@ mod tests {
 
     /// One layer stack as it sits in a plain file, hash word included: the
     /// biases are `i32`, the weights `i8`.
-    #[cfg(feature = "sfnn_progress")]
+    #[cfg(any(feature = "sfnn_progress", feature = "sfnn_threat"))]
     fn dense_stack_bytes(d: &NetDims) -> usize {
         4 + 4 * d.fc_0_output
             + d.fc_0_output * d.fc_0_padded_input

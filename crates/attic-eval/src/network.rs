@@ -53,6 +53,14 @@ pub fn layer_stack_index(pos: &Position) -> usize {
     crate::progress::bucket_index(pos)
 }
 
+/// Sirius's shape picks its stack by the integer game-phase sum and the king code, see
+/// [`crate::gp`]. This is the stack the position itself falls in; a position near a boundary
+/// is also mixed with its neighbour, which [`evaluate_with`] does.
+#[cfg(feature = "sfnn_threat")]
+pub fn layer_stack_index(pos: &Position) -> usize {
+    crate::gp::choose(pos).stack
+}
+
 /// The standard shapes carry one stack and choose nothing.
 ///
 /// `kLayerStacks` is 1 for `NNUE_kp_256x2_32_32` and its HalfKP twin, so the
@@ -115,6 +123,7 @@ pub fn evaluate(net: &NnueNetwork, pos: &Position) -> i32 {
 ///
 /// # Panics
 /// Panics if `pos` is missing either king (via bucket selection).
+#[cfg(not(feature = "sfnn_threat"))]
 pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i32 {
     let bucket = layer_stack_index(pos);
     debug_assert!(bucket < net.stacks.len());
@@ -127,13 +136,40 @@ pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i3
     score / fv_scale()
 }
 
+/// Sirius's evaluation from a current accumulator: the stack its game phase falls in, mixed
+/// with the neighbouring one within a blend zone, divided by [`fv_scale`] and clamped to
+/// `+-31753` (the range Sirius keeps its scores in).
+///
+/// # Panics
+/// Panics if `pos` is missing either king (via the stack choice).
+#[cfg(feature = "sfnn_threat")]
+pub fn evaluate_with(net: &NnueNetwork, acc: &Accumulator, pos: &Position) -> i32 {
+    let choice = crate::gp::choose(pos);
+    debug_assert!(choice.stack < net.stacks.len());
+
+    let mut transformed = [0u8; FT_OUTPUT_DIMS];
+    acc.output_transform(pos.side_to_move(), &mut transformed);
+
+    let mut raw = per_layer_flow(&transformed, &net.stacks[choice.stack]);
+    if let Some((other, weight)) = choice.blend {
+        let raw_other = per_layer_flow(&transformed, &net.stacks[other]);
+        raw = crate::gp::blend(raw, raw_other, weight);
+    }
+    // The single FV_SCALE consumption site.
+    (raw / fv_scale()).clamp(-SCORE_LIMIT, SCORE_LIMIT)
+}
+
+/// The largest score magnitude Sirius lets the network produce.
+#[cfg(feature = "sfnn_threat")]
+pub const SCORE_LIMIT: i32 = 31_753;
+
 /// Layer-stack forward pass over the transformed byte buffer, returning the raw
 /// network output before [`fv_scale`].
 ///
 /// A 1536 build with AVX-512 F + BW + VNNI runs the whole chain through the
 /// fused kernel; otherwise the per-layer flow below runs. The two are
-/// byte-for-byte equivalent. The fused kernel exists for that shape alone: the
-/// 64-wide shapes end their chain in a packed tail it has no port of.
+/// byte-for-byte equivalent. The fused kernel is that shape's alone: the
+/// 64-wide shapes end their chain in a packed tail, which is the next arm.
 #[cfg(all(
     feature = "sfnn_halfkahm2_1536_15_32_k3k3",
     target_arch = "x86_64",
@@ -163,11 +199,39 @@ fn per_layer_flow(transformed: &[u8; FC_0_INPUT_DIMS], stack: &NetworkStack) -> 
     }
 }
 
+/// Layer-stack forward pass, a 64-wide build (the 1024s and the 2304) with
+/// AVX-512 F + BW + VNNI: the reference's packed tail, on the group-major copies
+/// of the weights. Bit for bit [`per_layer_flow_unfused`].
+#[cfg(all(
+    feature = "sfnn_progress",
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    target_feature = "avx512bw",
+    target_feature = "avx512vnni"
+))]
+fn per_layer_flow(transformed: &[u8; FC_0_INPUT_DIMS], stack: &NetworkStack) -> i32 {
+    use crate::simd::avx512_packed_tail::{Stack, fc_chain};
+
+    let packed = Stack {
+        fc_0_biases: &stack.fc_0_biases,
+        fc_0_grouped: &stack.grouped.fc_0,
+        fc_1_biases: &stack.fc_1_biases,
+        fc_1_grouped: &stack.grouped.fc_1,
+        fc_2_biases: &stack.fc_2_biases,
+        fc_2_packed: &stack.grouped.fc_2,
+    };
+    // SAFETY: this arm is compiled only into a build enabling avx512f +
+    // avx512bw + avx512vnni, exactly the features `fc_chain` names, and such a
+    // build only ever runs on a host providing them. `fc_chain` checks the
+    // lengths it reads by pointer.
+    unsafe { fc_chain(transformed, &packed) }
+}
+
 /// Layer-stack forward pass, every other SFNN build.
 #[cfg(all(
     feature = "sfnn",
     not(all(
-        feature = "sfnn_halfkahm2_1536_15_32_k3k3",
+        any(feature = "sfnn_halfkahm2_1536_15_32_k3k3", feature = "sfnn_progress"),
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
@@ -452,10 +516,15 @@ mod tests {
         transformed[0] = 39;
 
         assert_eq!(per_layer_flow(&transformed, stack), 1_256);
-        // Whole-pipeline division by the default FV_SCALE: 1_256 / 16 = 78.
+        // Whole-pipeline division by the default FV_SCALE: 1_256 / 16 = 78 (1_256 / 26 = 48 for
+        // the threat shape, whose default is Sirius's).
         assert_eq!(
             per_layer_flow(&transformed, stack) / crate::scale::FV_SCALE_DEFAULT,
-            78
+            if cfg!(feature = "sfnn_threat") {
+                48
+            } else {
+                78
+            }
         );
     }
 
@@ -573,6 +642,79 @@ mod tests {
                 "the 7-bit flow disagrees with the unfused reference (round {round})",
             );
         }
+    }
+
+    /// The NAGISA V4 network's own weights, every one of its nine stacks, through
+    /// the selected chain and the unfused one: real output-transform bytes from
+    /// a handful of positions, and random ones with as many zeros as the real
+    /// ones and more. On an AVX-512 VNNI build that is the packed tail against
+    /// the scalar chain, on these weights rather than made-up ones.
+    ///
+    /// Skipped unless `ATTIC_HALFKA2304_NN` names the file, as the loader's test
+    /// of it is.
+    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_v4_network_s_stacks_match_the_unfused_reference() {
+        let Ok(path) = std::env::var("ATTIC_HALFKA2304_NN") else {
+            return;
+        };
+        let (net, _) = crate::loader::load_network_with_dims(
+            std::path::Path::new(&path),
+            &crate::types::NetDims::HALFKA2304,
+        )
+        .expect("HALFKA2304 network should parse");
+
+        let mut inputs = Vec::new();
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r7/p1ppp1bpp/1p3pp2/7P1/2P6/PP1PPPP1P/1B3S1R1/LNSGKG1NL b - 9",
+            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+            "6n1l/2+S1k4/2lp4p/1np1B2b1/3PP4/1N1S3rP/1P2+pPP+p1/1p1G5/3KG2r1 b GSN2L4Pgs2p 1",
+            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+        ] {
+            let pos = parse_sfen(sfen).unwrap();
+            let mut acc = Accumulator::new();
+            acc.refresh(&net, &pos);
+            for stm in [attic_state::Color::Black, attic_state::Color::White] {
+                let mut t = [0u8; FC_0_INPUT_DIMS];
+                acc.output_transform(stm, &mut t);
+                inputs.push(t);
+            }
+        }
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for zero_permille in [0u64, 300, 600, 900] {
+            for _ in 0..16 {
+                let mut t = [0u8; FC_0_INPUT_DIMS];
+                for x in t.iter_mut() {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *x = if state % 1000 < zero_permille {
+                        0
+                    } else {
+                        ((state >> 16) % 127) as u8
+                    };
+                }
+                inputs.push(t);
+            }
+        }
+
+        let mut compared = 0;
+        for (bucket, stack) in net.stacks.iter().enumerate() {
+            for (k, t) in inputs.iter().enumerate() {
+                assert_eq!(
+                    per_layer_flow(t, stack),
+                    per_layer_flow_unfused(t, stack),
+                    "stack {bucket}, input {k}"
+                );
+                compared += 1;
+            }
+        }
+        eprintln!(
+            "{compared} evaluations of the V4 network agree ({:?})",
+            crate::simd::active_backend()
+        );
     }
 
     /// The layer chain written out with the always-scalar kernels, as a
