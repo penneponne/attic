@@ -327,7 +327,13 @@ impl Accumulator {
     ///
     /// # Panics
     /// Panics if this delta requires a full refresh for either perspective.
-    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[cfg(any(
+        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        all(
+            target_family = "wasm",
+            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+        )
+    ))]
     pub fn derive_from_delta(src: &Self, dst: &mut Self, net: &NnueNetwork, delta: &MoveDelta) {
         for color in [Color::Black, Color::White] {
             let i = color.index();

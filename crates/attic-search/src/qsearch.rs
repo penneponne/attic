@@ -487,10 +487,22 @@ pub struct QSearch<'a> {
     /// `undo_move`; `0` at every root node.
     acc_depth: usize,
     /// Ordinary move deltas are saved until the next NNUE evaluation.
-    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[cfg(any(
+        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        all(
+            target_family = "wasm",
+            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+        )
+    ))]
     acc_pending: Box<[Option<MoveDelta>; ACC_LEN]>,
     /// The deepest materialized accumulator on the active path.
-    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[cfg(any(
+        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        all(
+            target_family = "wasm",
+            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+        )
+    ))]
     acc_ready: usize,
     /// This worker's private finny table: one cached refreshed
     /// accumulator half per (perspective, own-king square), so a `do_move` whose
@@ -748,9 +760,21 @@ impl<'a> QSearch<'a> {
                 .map_err(|_| ())
                 .expect("ACC_LEN slots collected"),
             acc_depth: 0,
-            #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+            #[cfg(any(
+                feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                all(
+                    target_family = "wasm",
+                    feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+                )
+            ))]
             acc_pending: Box::new([None; ACC_LEN]),
-            #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+            #[cfg(any(
+                feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                all(
+                    target_family = "wasm",
+                    feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+                )
+            ))]
             acc_ready: 0,
             finny: FinnyCache::new(),
             verify_accumulator: false,
@@ -1092,7 +1116,13 @@ impl<'a> QSearch<'a> {
     /// evaluation site in the search routes through here.
     #[inline]
     fn static_eval(&mut self, pos: &Position) -> Value {
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(any(
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            all(
+                target_family = "wasm",
+                feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+            )
+        ))]
         self.ensure_accumulator();
         let value = evaluate_with(self.net, self.acc(), pos);
         if self.verify_accumulator {
@@ -1111,7 +1141,13 @@ impl<'a> QSearch<'a> {
     fn seed_accumulator(&mut self, pos: &Position) {
         let net = self.net;
         self.acc_depth = 0;
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(any(
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            all(
+                target_family = "wasm",
+                feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+            )
+        ))]
         {
             self.acc_ready = 0;
         }
@@ -1136,7 +1172,13 @@ impl<'a> QSearch<'a> {
     /// Materialize deferred deltas along the path. Every pending move has
     /// both feature-index lists, so deriving its accumulator does not read
     /// the current board or update the king-refresh cache.
-    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[cfg(any(
+        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        all(
+            target_family = "wasm",
+            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+        )
+    ))]
     fn ensure_accumulator(&mut self) {
         while self.acc_ready < self.acc_depth {
             let parent = self.acc_ready;
@@ -1165,7 +1207,13 @@ impl<'a> QSearch<'a> {
         shared.correction_prefetch(post_pos.non_pawn_key(Color::White), us);
         shared.correction_prefetch(post_pos.non_pawn_key(Color::Black), us);
 
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(any(
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            all(
+                target_family = "wasm",
+                feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+            )
+        ))]
         {
             if delta.half(Color::Black).is_some() && delta.half(Color::White).is_some() {
                 self.acc_depth += 1;
@@ -1188,7 +1236,13 @@ impl<'a> QSearch<'a> {
             &mut self.finny,
         );
         self.acc_depth = d + 1;
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(any(
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            all(
+                target_family = "wasm",
+                feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+            )
+        ))]
         {
             self.acc_ready = self.acc_depth;
         }
@@ -1199,7 +1253,13 @@ impl<'a> QSearch<'a> {
     #[inline]
     fn pop_accumulator(&mut self) {
         self.acc_depth -= 1;
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(any(
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            all(
+                target_family = "wasm",
+                feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+            )
+        ))]
         {
             self.acc_ready = self.acc_ready.min(self.acc_depth);
         }
@@ -1839,7 +1899,13 @@ impl QSearch<'_> {
                     self.root_depth = root_depth;
                     // Slot 0 still holds the root refresh seeded above.
                     self.acc_depth = 0;
-                    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+                    #[cfg(any(
+                        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                        all(
+                            target_family = "wasm",
+                            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+                        )
+                    ))]
                     {
                         self.acc_ready = 0;
                     }
