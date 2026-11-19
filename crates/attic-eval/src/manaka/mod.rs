@@ -77,7 +77,9 @@
 //! `SqrClippedReLU` and `ClippedReLU` side by side: with `z1 = W1 x + b1`,
 //! `a1 = [clamp(z1², 0, 1) ‖ clamp(z1, 0, 1)]`, `z2 = W2 a1 + b2` and `a2` likewise, the value
 //! is `value_w · [a1 ‖ a2] + value_b`. `W2` is `[HIDDEN2][2·HIDDEN]` and the value row is
-//! `2·(HIDDEN + HIDDEN2)` wide. Only the first layer is ever an integer layer, and it hands
+//! `2·(HIDDEN + HIDDEN2)` wide. Two ablations are shapes of their own: `noskip` reads the second
+//! layer's half alone (`HEAD` is `2·HIDDEN2` and `HEAD_AT` where it starts), and `nosqr` reads the
+//! plain clip in the square's place, so that only the square is taken out. Only the first layer is ever an integer layer, and it hands
 //! over its sum unclipped (`layer_pre`); everything after it is `f32`.
 //!
 //! Its value is in NNUE's units. The row's output is multiplied by [`RAW_SCALE`]
@@ -95,6 +97,8 @@
 mod accumulator;
 mod body;
 mod cache;
+#[cfg(feature = "clip_stats")]
+pub mod clip_stats;
 mod dense;
 #[cfg(feature = "sym_token")]
 mod field;
@@ -124,9 +128,9 @@ pub use pair_table::{PairPrecision, PairTable};
 pub use qdense::QuantW1;
 pub use qdense_i8::QuantW1I8;
 pub use shape::{
-    BLOCK_LEN, DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR,
-    HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, PAIR_ROWS,
-    POWER_LEN, SECOND_INPUT, TOKENS,
+    BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT,
+    HAS_PAIR, HEAD, HEAD_AT, HIDDEN, HIDDEN2, HM, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, NOSQR,
+    ORDER, PAIR, PAIR_AT, PAIR_ROWS, POWER_LEN, SECOND_INPUT, TOKENS,
 };
 
 /// A loaded network, with the tables this shape actually reads.

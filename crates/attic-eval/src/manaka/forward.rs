@@ -11,13 +11,15 @@
 //! the row's output as it is: there is no norm, no `tanh` and no unbounded
 //! activation anywhere in it.
 
+use std::cell::RefCell;
+
 use attic_state::Color;
 
 use super::dense;
 use super::{
-    Accumulator, BLOCK_LEN, DIM, DUAL, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer, HAS_FIELD,
-    HAS_MOMENT, HAS_PAIR, HEAD, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT,
-    POWER_LEN, SECOND_INPUT, SymNetwork,
+    Accumulator, BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer,
+    HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD_AT, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, NOSQR, ORDER,
+    PAIR, PAIR_AT, POWER_LEN, SymNetwork,
 };
 
 pub(super) use dense::{dense_clip, dense_pre};
@@ -283,25 +285,42 @@ pub(super) fn features_from_sums(
 /// output: a row of weights over activations that are themselves clipped to
 /// `[0, 1]`.
 pub(super) fn value_from_sums(net: &SymNetwork, acc: &Accumulator, stm: Color) -> f32 {
-    let mut features = [0.0f32; FEATURE_LEN];
-    features_from_sums(net, acc, stm, &mut features);
+    FEATURES.with_borrow_mut(|features| {
+        // An entry the blocks leave unwritten would be the last evaluation's here, and not the zero a fresh
+        // array has; a debug build makes it a NaN, which the value carries through to every test.
+        #[cfg(debug_assertions)]
+        features.fill(f32::NAN);
+        features_from_sums(net, acc, stm, features);
 
-    if DUAL {
-        return dual_value(net, &features);
-    }
+        if DUAL {
+            return dual_value(net, features);
+        }
 
-    let mut hidden = [0.0f32; HIDDEN];
-    match &net.first {
-        FirstLayer::F32 => dense_clip(&net.w1, &net.b1, &features, &mut hidden),
-        FirstLayer::I16(q) => q.layer_clip(&features, &net.b1, &mut hidden),
-        FirstLayer::I8(q) => q.layer_clip(&features, &net.b1, &mut hidden),
-    }
+        let mut hidden = [0.0f32; HIDDEN];
+        match &net.first {
+            FirstLayer::F32 => dense_clip(&net.w1, &net.b1, features, &mut hidden),
+            FirstLayer::I16(q) => q.layer_clip(features, &net.b1, &mut hidden),
+            FirstLayer::I8(q) => q.layer_clip(features, &net.b1, &mut hidden),
+        }
 
-    let mut second = [0.0f32; HIDDEN2];
-    dense_clip(&net.w2, &net.b2, &hidden, &mut second);
+        let mut second = [0.0f32; HIDDEN2];
+        dense_clip(&net.w2, &net.b2, &hidden, &mut second);
 
-    // The value row's sum is the dense layers' too: eight lanes, as Manaka's is.
-    net.value_b + dense::dot(&net.value_w, &second)
+        // Reads the three arrays and writes nothing, so the value below is the one it would be.
+        #[cfg(feature = "clip_stats")]
+        super::clip_stats::record(&net.first, features, &hidden, &second);
+
+        // The value row's sum is the dense layers' too: eight lanes, as Manaka's is.
+        net.value_b + dense::dot(&net.value_w, &second)
+    })
+}
+
+thread_local! {
+    /// The head's input, one buffer a thread. [`features_from_sums`] writes every entry, each block whole,
+    /// before anything reads it, so the buffer is not cleared between evaluations. A fresh array would be:
+    /// at this size the clear is a call to the C library's `memset`, musl's in the static build the lab
+    /// plays, and with the `i16` layer's own buffer it came to two percent of a node.
+    static FEATURES: RefCell<[f32; FEATURE_LEN]> = const { RefCell::new([0.0; FEATURE_LEN]) };
 }
 
 /// `clamp(z², 0, 1)`: Stockfish's `SqrClippedReLU`. `z²` is not negative, so the lower bound
@@ -311,12 +330,17 @@ pub(super) fn sqr_clip(z: f32) -> f32 {
     (z * z).clamp(0.0, 1.0)
 }
 
-/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` into `out`, which is twice as long as `z`.
+/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` into `out`, which is twice as long as `z`. In the `nosqr`
+/// ablation the first half is the plain clip again.
 fn double(z: &[f32], out: &mut [f32]) {
     debug_assert_eq!(out.len(), 2 * z.len());
-    let (squares, clips) = out.split_at_mut(z.len());
-    for ((sq, clip), &z) in squares.iter_mut().zip(clips).zip(z) {
-        *sq = sqr_clip(z);
+    let (firsts, clips) = out.split_at_mut(z.len());
+    for ((first, clip), &z) in firsts.iter_mut().zip(clips).zip(z) {
+        *first = if NOSQR {
+            z.clamp(0.0, 1.0)
+        } else {
+            sqr_clip(z)
+        };
         *clip = z.clamp(0.0, 1.0);
     }
 }
@@ -335,15 +359,16 @@ fn dual_value(net: &SymNetwork, features: &[f32; FEATURE_LEN]) -> f32 {
         FirstLayer::I8(q) => q.layer_pre(features, &net.b1, &mut z1),
     }
 
-    let mut head = [0.0f32; HEAD];
-    let (first, second) = head.split_at_mut(SECOND_INPUT);
+    let mut head = [0.0f32; DOUBLED];
+    let (first, second) = head.split_at_mut(2 * HIDDEN);
     double(&z1, first);
 
     let mut z2 = [0.0f32; HIDDEN2];
     dense_pre(&net.w2, &net.b2, first, &mut z2);
     double(&z2, second);
 
-    net.value_b + dense::dot(&net.value_w, &head)
+    // The value row reads `[a1 ‖ a2]`, or the second layer's half alone under `noskip`.
+    net.value_b + dense::dot(&net.value_w, &head[HEAD_AT..])
 }
 
 #[cfg(test)]

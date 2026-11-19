@@ -5,8 +5,8 @@ use super::super::loader::{arch_hash, expected_arch, parse_network};
 use super::super::shape::SQUARES;
 use super::super::{
     BLOCK_LEN, DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR,
-    HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, PAIR_ROWS,
-    POWER_LEN, SECOND_INPUT, TOKENS, evaluate_value,
+    HEAD, HEAD_AT, HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, ORDER, PAIR, PAIR_AT,
+    PAIR_ROWS, POWER_LEN, SECOND_INPUT, TOKENS, evaluate_value,
 };
 use super::encode::{encode, encoded};
 use super::exported::EXPORTED;
@@ -119,12 +119,13 @@ fn the_derived_lengths_agree_with_each_other() {
     // The value row reads the second layer, or both layers' doubled activations.
     assert_eq!(
         HEAD,
-        if DUAL {
-            2 * (HIDDEN + HIDDEN2)
-        } else {
-            HIDDEN2
+        match (DUAL, NOSKIP) {
+            (false, _) => HIDDEN2,
+            (true, false) => 2 * (HIDDEN + HIDDEN2),
+            (true, true) => 2 * HIDDEN2,
         }
     );
+    assert_eq!(HEAD_AT, if DUAL && NOSKIP { 2 * HIDDEN } else { 0 });
     assert_eq!(SECOND_INPUT, if DUAL { 2 * HIDDEN } else { HIDDEN });
     assert_eq!(TOKENS, crate::NUM_FEATURES);
     assert_eq!(PAIR_ROWS, if HAS_PAIR { 2_745_996 } else { 0 });

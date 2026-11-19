@@ -86,6 +86,40 @@ pub(super) const EXPORTED: Exported = Exported {
     hash: 0xc450c6de,
 };
 
+/// The first ablation of the dual head, from the file `export-nnue` wrote for its seed-1 initial net
+/// (`pair16_d128_o1_h32_h232_dual_noskip`, tideborn `0694e7b5`, 2026-11-12). There is no `Skip`: the value
+/// row reads the second layer's `[sqr || clip]` alone, 64 wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual_noskip")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-64](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)]))))))",
+    hash: 0xf4d918d5,
+};
+
+/// The second ablation, from the same export of `pair16_d128_o1_h32_h232_dual_nosqr`: the dual head's
+/// widths and `Skip`, with `TwinClippedReLU` (a plain clip twice) where the dual head has the square.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual_nosqr")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-128](Skip[32,32](TwinClippedReLU[32](Dense[32<-64](TwinClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)])))))))",
+    hash: 0xad8bcc76,
+};
+
+/// From the file `export-nnue` wrote for a net trained at this shape with `hm` (QS 1000M, 2026-11-12,
+/// tideborn `feat/synn-dual-act` ee7bf590): the string is the plain pair16 o1's with `FoldedTokens` where it
+/// says `Tokens`, and nothing else. A build without hm refuses this string and this build refuses the plain one.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_hm")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "FoldedTokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)]))))))",
+    hash: 0x0af15d6f,
+};
+
+/// From the file `export-nnue` wrote for a net at this shape (tideborn `feat/hm-pair-plain` d7bf3a4d,
+/// 2026-11-18): the pair16 o1 string with the pair table eight wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair8_o1")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-272](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[8](PairSum[8](InputSlice[8(128:136)]))))))",
+    hash: 0x185437be,
+};
+
 /// From the file `export-nnue` wrote at tideborn's `feat/synn-dual-act` (76418c07) for
 /// this shape's seed-1 initial net (`pair32_d32_o1_h32_h232_dual`, 2026-11-12); the string depends on the
 /// shape alone.

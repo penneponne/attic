@@ -21,6 +21,59 @@ fn pair_rows_number_the_upper_triangle_in_order() {
     assert_eq!(PAIR_ROWS, if HAS_PAIR { next } else { 0 });
 }
 
+/// The offsets the kernels read their rows at are `pair_row · stride` for each of
+/// the others, from the path the build runs, at every count from none to the most a
+/// position has, for the strides of the tables there are, with the extreme tokens
+/// (the first, the last, the two next to each other) in the draw.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[test]
+fn the_row_offsets_are_the_pair_rows_times_the_stride() {
+    use super::super::pair::{OFFSETS, row_offsets, row_offsets_scalar};
+    use super::super::pair_table::{ROW, SCALED_ROW};
+    use crate::tokens::FeatureIndex;
+
+    if !HAS_PAIR {
+        return;
+    }
+    let last = TOKENS as FeatureIndex - 1;
+    let mut state = 17u64;
+    let mut pick = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        match (state >> 60) % 6 {
+            0 => 0,
+            1 => last,
+            2 => last - 1,
+            _ => ((state >> 33) as usize % TOKENS) as FeatureIndex,
+        }
+    };
+    for stride in [ROW, SCALED_ROW] {
+        for count in 0..=OFFSETS {
+            for _ in 0..40 {
+                let token = pick();
+                let mut others = Vec::new();
+                while others.len() < count {
+                    let other = pick();
+                    if other != token && !others.contains(&other) {
+                        others.push(other);
+                    }
+                }
+                let want = row_offsets_scalar(token, &others, stride);
+                let got = row_offsets(token, &others, stride);
+                for (at, &other) in others.iter().enumerate() {
+                    assert_eq!(
+                        got[at] as usize,
+                        pair_row(token, other) * stride,
+                        "stride {stride}, {count} others, entry {at}"
+                    );
+                    assert_eq!(got[at], want[at], "stride {stride}, entry {at}");
+                }
+            }
+        }
+    }
+}
+
 /// The totals the derive adds to the pair sums, from the path the build runs, are
 /// the plain ones to the last bit: the same rows, in the same two totals, in the
 /// same order. Every count of other tokens from none to thirty-nine, so that an
@@ -54,7 +107,7 @@ fn the_row_totals_are_the_plain_ones_to_the_last_bit() {
                 others.push(other);
             }
         }
-        let want = row_totals_scalar(table, token, &others);
+        let want = row_totals_scalar(table.halves(), token, &others);
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -62,7 +115,8 @@ fn the_row_totals_are_the_plain_ones_to_the_last_bit() {
         ))]
         {
             // SAFETY: the `cfg` is the build enabling AVX2 and F16C.
-            let got = unsafe { super::super::pair::row_totals_avx2(table, token, &others) };
+            let got =
+                unsafe { super::super::pair::row_totals_avx2(table.halves(), token, &others) };
             for (channel, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert_eq!(
                     g.to_bits(),

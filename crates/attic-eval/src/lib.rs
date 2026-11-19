@@ -21,6 +21,13 @@ mod scale;
 mod tokens;
 mod types;
 
+// Sirius's network: the threat features and the game-phase stack choice. Public because the
+// tests outside the crate check the lists and the choice against their own oracles.
+#[cfg(feature = "sfnn_threat")]
+pub mod gp;
+#[cfg(feature = "sfnn_threat")]
+pub mod threat;
+
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 mod finny;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
@@ -59,6 +66,11 @@ pub use hce::{
     evaluate_with, load_network, load_network_with_warnings,
 };
 
+#[cfg(all(feature = "clip_stats", not(feature = "sym")))]
+compile_error!(
+    "`clip_stats` counts the head of a SYNN shape (`synn_*`); this shape has no counters"
+);
+
 pub use aligned::Aligned64;
 #[cfg(not(any(feature = "hce", feature = "sym_token")))]
 pub use features::{
@@ -87,6 +99,8 @@ pub use features::{MoveDelta, PerspectiveDelta};
 pub use finny::FinnyCache;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 pub use loader::{load_network, load_network_with_dims, load_network_with_warnings};
+#[cfg(feature = "sfnn_threat")]
+pub use network::SCORE_LIMIT;
 #[cfg(not(any(feature = "sym", feature = "hce")))]
 pub use network::{evaluate, evaluate_with, layer_stack_index};
 #[cfg(not(any(feature = "sym", feature = "hce")))]

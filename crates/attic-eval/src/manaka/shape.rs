@@ -30,6 +30,12 @@ struct Dims {
     /// Stockfish's `SqrClippedReLU` and `ClippedReLU` side by side. The second layer then
     /// reads twice the first layer's width, and the value row reads both layers' activations.
     dual: bool,
+    /// The dual head's first ablation: the value row reads the second layer's half alone, not
+    /// both layers' (`Skip` in the architecture string is gone, and the row is `2·HIDDEN2` wide).
+    noskip: bool,
+    /// The second ablation: each layer is `[clamp(z, 0, 1) ‖ clamp(z, 0, 1)]`, with no square. The
+    /// widths are the dual head's; only the activation is another (`TwinClippedReLU`).
+    nosqr: bool,
 }
 
 impl Dims {
@@ -44,11 +50,27 @@ impl Dims {
             moment: 0,
             field: 0,
             dual: false,
+            noskip: false,
+            nosqr: false,
         }
     }
 
     const fn dual(self) -> Dims {
         Dims { dual: true, ..self }
+    }
+
+    const fn noskip(self) -> Dims {
+        Dims {
+            noskip: true,
+            ..self
+        }
+    }
+
+    const fn nosqr(self) -> Dims {
+        Dims {
+            nosqr: true,
+            ..self
+        }
     }
 
     const fn pair(self, pair: usize) -> Dims {
@@ -88,6 +110,12 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(256, 3, 32, 32)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16") {
     Dims::new(128, 3, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_dual_noskip") {
+    // The dual head with the value row reading the second layer's half alone.
+    Dims::new(128, 1, 32, 32).pair(16).dual().noskip()
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_dual_nosqr") {
+    // The dual head with the plain clip in the square's place.
+    Dims::new(128, 1, 32, 32).pair(16).dual().nosqr()
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_dual") {
     // The same shape with both hidden layers doubled into a square clip and a plain clip.
     Dims::new(128, 1, 32, 32).pair(16).dual()
@@ -100,16 +128,32 @@ const DIMS: Dims = if cfg!(any(
 } else if cfg!(feature = "synn_token_32x2_32_32_pair24_o1_dual") {
     // The dual head with the embedding narrowed to 32 and the pair table widened to 24 channels.
     Dims::new(32, 1, 32, 32).pair(24).dual()
-} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1") {
+} else if cfg!(any(
+    feature = "synn_token_128x2_32_32_pair16_o1",
+    feature = "synn_token_128x2_32_32_pair16_o1_hm"
+)) {
     // The pair table with the power sums at order one, which is the sum of the
     // embeddings alone: the pair table carries the interactions the higher orders
     // would.
     Dims::new(128, 1, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair8_o1") {
+    // The pair table at half the width: a derive reads half the bytes a pair, the one cost of a node
+    // that grows with the pieces on the board.
+    Dims::new(128, 1, 32, 32).pair(8)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_m8_f2") {
     Dims::new(128, 3, 32, 32).pair(16).moment(8).field(2)
 } else {
     panic!("a Manaka shape has to be selected: see the features of attic-eval")
 };
+
+/// Whether each frame is read in its horizontal-mirror canonical form (`hm`, as HalfKAv2_hm does it): when
+/// the frame's own king stands on the sixth to ninth file, every board token of that frame is reflected left
+/// to right before its row is read, and the hands are left as they are.
+///
+/// A property of how the file is read and not of its dimensions, so it is a feature of its own (`sym_hm`) and
+/// not a row of [`DIMS`]. It is a constant: a build without it compiles none of the folding, and its code
+/// and speed are what they were.
+pub const HM: bool = cfg!(feature = "sym_hm");
 
 /// The width of one perspective's embedding.
 pub const DIM: usize = DIMS.dim;
@@ -130,13 +174,28 @@ pub const DUAL: bool = DIMS.dual;
 /// many when each unit is read twice.
 pub const SECOND_INPUT: usize = if DUAL { 2 * HIDDEN } else { HIDDEN };
 
+/// Whether the value row leaves the first layer's activations out: see [`Dims::noskip`].
+pub const NOSKIP: bool = DIMS.noskip;
+
+/// Whether the square is taken out of the doubled activations: see [`Dims::nosqr`].
+pub const NOSQR: bool = DIMS.nosqr;
+
+/// A dual head's two layers' activations side by side, `[a1 ‖ a2]`, whether or not the value row
+/// reads all of it.
+pub const DOUBLED: usize = 2 * (HIDDEN + HIDDEN2);
+
+/// Where in `[a1 ‖ a2]` the value row starts reading: after the first layer's half when `noskip`
+/// cuts it off.
+pub const HEAD_AT: usize = if DUAL && NOSKIP { 2 * HIDDEN } else { 0 };
+
 /// What the value row reads: the last hidden layer, which is the second; or, doubled, both
-/// layers' activations side by side, `[a1 ‖ a2]`.
-pub const HEAD: usize = if DUAL {
-    2 * (HIDDEN + HIDDEN2)
-} else {
-    HIDDEN2
-};
+/// layers' activations side by side, `[a1 ‖ a2]` (the second layer's half alone, `noskip`).
+pub const HEAD: usize = if DUAL { DOUBLED - HEAD_AT } else { HIDDEN2 };
+
+const _: () = assert!(
+    DUAL || !(NOSKIP || NOSQR),
+    "the ablations are of the dual head"
+);
 
 /// Rows of the embedding table.
 ///
@@ -231,6 +290,10 @@ const _: () = {
         "synn_token_128x2_32_32_pair16",
         "synn_token_128x2_32_32_pair16_o1",
         "synn_token_128x2_32_32_pair16_o1_dual",
+        "synn_token_128x2_32_32_pair16_o1_dual_noskip",
+        "synn_token_128x2_32_32_pair16_o1_dual_nosqr",
+        "synn_token_128x2_32_32_pair16_o1_hm",
+        "synn_token_128x2_32_32_pair8_o1",
         "synn_token_32x2_32_32_pair32_o1_dual",
         "synn_token_64x2_32_32_pair16_o1_dual",
         "synn_token_32x2_32_32_pair24_o1_dual",
@@ -239,6 +302,14 @@ const _: () = {
     assert!(
         selected == 1,
         "select exactly one Manaka shape: they differ in their dimensions"
+    );
+};
+
+const _: () = {
+    // Only the token space has an own king whose file can be asked, and a table row that a fold can reflect.
+    assert!(
+        !HM || cfg!(feature = "sym_token"),
+        "hm folds the board squares of the token space only"
     );
 };
 

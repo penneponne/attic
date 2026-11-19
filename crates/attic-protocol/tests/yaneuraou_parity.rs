@@ -1,8 +1,8 @@
-//! Search parity against YaneuraOu 9.80 (KP256), through the USI front end.
+//! Search parity against YaneuraOu 9.96 (KP256), through the USI front end.
 //!
 //! For every position in the fixture the engine is driven the way a GUI does it
 //! (`usinewgame`, `isready`, wait for `readyok`, `position`, `go nodes 100000`,
-//! wait for `bestmove`) and its output is compared with what YaneuraOu 9.80
+//! wait for `bestmove`) and its output is compared with what YaneuraOu 9.96
 //! printed for the same position and the same options:
 //!
 //! * every `info depth` line, with `time` / `nps` / `hashfull` removed — so the
@@ -182,7 +182,7 @@ fn comparison_detects_a_one_node_difference() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn search_matches_yaneuraou_9_80_kp256() {
+fn search_matches_yaneuraou_9_96_kp256() {
     let nn = network_path();
     if !nn.exists() {
         let msg = format!(
@@ -193,7 +193,7 @@ fn search_matches_yaneuraou_9_80_kp256() {
             std::env::var_os("ATTIC_REQUIRE_PARITY").is_none(),
             "ATTIC_REQUIRE_PARITY is set but {msg}"
         );
-        eprintln!("skipping search_matches_yaneuraou_9_80_kp256: {msg}");
+        eprintln!("skipping search_matches_yaneuraou_9_96_kp256: {msg}");
         return;
     }
 
@@ -276,7 +276,7 @@ fn search_matches_yaneuraou_9_80_kp256() {
             .collect::<Vec<_>>()
             .join("\n");
         panic!(
-            "{} of {} positions differ from YaneuraOu 9.80 (nn.bin must be the file with sha256 {}):\n{shown}",
+            "{} of {} positions differ from YaneuraOu 9.96 (nn.bin must be the file with sha256 {}):\n{shown}",
             mismatches.len(),
             records.len(),
             manifest.eval_sha256

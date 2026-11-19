@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use attic_state::{Move, Position};
 
 use super::super::{
-    DIM, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_LEN,
-    ORDER, PAIR, PAIR_ROWS, PairTable, SECOND_INPUT, SymNetwork, TOKENS,
+    DIM, DUAL, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT,
+    MOMENT_LEN, ORDER, PAIR, PAIR_ROWS, PairTable, SECOND_INPUT, SymNetwork, TOKENS,
 };
 
 /// The synthetic pair table from values drawn in `f32`: rounded to halves the way
@@ -77,25 +77,28 @@ pub(super) fn synthetic() -> &'static SymNetwork {
 struct Gain;
 
 impl Gain {
-    const W1: f32 = 0.3;
+    /// A pair table half as wide leaves the first layer with a sixth fewer inputs and less spread from
+    /// the table it keeps, so its rows want more weight to reach the upper rail.
+    const W1: f32 = if super::super::PAIR == 8 { 0.6 } else { 0.3 };
     /// The second layer reads at most `HIDDEN` activations in `[0, 1]`, where the
     /// first reads hundreds, so it wants more weight to reach a rail.
     const W2: f32 = 2.0;
-    const PAIR: f32 = 0.1;
+    /// Eight channels sum fewer rows' worth of spread than sixteen do, so a table that narrow wants a
+    /// larger gain to reach the upper rail on the opening's thirty plies.
+    const PAIR: f32 = if super::super::PAIR == 8 { 0.2 } else { 0.1 };
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
 
-    /// The first layer's input width the fixture was calibrated on: pair16 at order one,
-    /// `2 · (128 + 16)`, the narrowest of the shapes that were tested until the narrow
-    /// embeddings came. An input narrower than that keeps the first layer's sums inside
-    /// `(-1, 1)`, and the dual head's square clip never reaches its rail in the test that
-    /// looks for it. The weights are widened in proportion to the shortfall, `288 / n`
-    /// (at `√(288 / n)` the pair32 d32 net still had no first-layer sum outside it), and by
-    /// one for every shape at or above 288, so those nets are what they were.
-    const W1_REFERENCE_LEN: usize = 288;
-
+    /// The dual-head fixture was calibrated on 288 inputs, with a 128-wide embedding and
+    /// 16 pair channels per side. Narrower dual heads need larger weights to exercise the
+    /// square clip's upper rail. Scaling by the ratio of input widths reaches that rail
+    /// where scaling by its square root did not.
     fn w1_width() -> f32 {
-        (Self::W1_REFERENCE_LEN as f32 / FEATURE_LEN as f32).max(1.0)
+        if DUAL {
+            (288.0 / FEATURE_LEN as f32).max(1.0)
+        } else {
+            1.0
+        }
     }
 
     /// The power-sum block of order `k + 1`: the sums grow with the order.
@@ -115,7 +118,7 @@ pub(super) fn upto(n: usize) -> std::ops::Range<usize> {
 /// The smaller of two shape constants. Written as `HIDDEN.min(HIDDEN2)` it is a
 /// comparison clippy sees is decided at compile time, and refuses; through a
 /// function argument it is a number it does not know.
-#[cfg(not(feature = "dual_head"))]
+#[cfg(not(feature = "sym_dual"))]
 pub(super) fn least(a: usize, b: usize) -> usize {
     a.min(b)
 }
@@ -179,6 +182,61 @@ pub(super) fn random_game(seed: u64, plies: usize) -> Vec<(Position, Move)> {
     line
 }
 
+/// A game in which the kings are walked across the line between the fifth and sixth files and back.
+///
+/// A random game keeps both kings near home: they cross that line (where an `hm` net changes how a whole
+/// frame is read) almost never. Here, on each ply, if the side to move has a king step that crosses the
+/// line it is played with probability `cross`, otherwise any king step with probability `walk`, and
+/// otherwise a random legal move; the game is still the same line for a given `seed`.
+#[cfg(feature = "sym_hm")]
+pub(super) fn king_walk_game(
+    seed: u64,
+    plies: usize,
+    cross: f64,
+    walk: f64,
+) -> Vec<(Position, Move)> {
+    use attic_state::PieceKind;
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    let mut pos = Position::startpos();
+    let mut line = Vec::new();
+    let mut legal = Vec::new();
+    // `index / 9` runs 0 to 8 across the board and the fifth file is 4. A king is folded by its owner's view,
+    // which for black is `index / 9 < 4` and for white is the board turned, `index / 9 > 4`; either way the
+    // line is between 4 and its neighbour on one side, so a step that changes `index / 9` between `<= 4` and
+    // `> 4`, or between `< 4` and `>= 4`, crosses it for one of the two colours. Taking a step to or from
+    // file 4 (the fifth) covers both.
+    let side = |index: u8| (index / 9).cmp(&4);
+    for _ in 0..plies {
+        legal.clear();
+        pos.generate_legal_all(&mut legal);
+        if legal.is_empty() {
+            break;
+        }
+        let kings: Vec<Move> = legal
+            .iter()
+            .copied()
+            .filter(|mv| !mv.is_drop() && mv.moved_piece_after().kind == PieceKind::King)
+            .collect();
+        let crossing: Vec<Move> = kings
+            .iter()
+            .copied()
+            .filter(|mv| side(mv.from_sq().index()) != side(mv.to_sq().index()))
+            .collect();
+        let draw = rng.below(1000) as f64 / 1000.0;
+        let mv = if !crossing.is_empty() && draw < cross {
+            crossing[rng.below(crossing.len())]
+        } else if !kings.is_empty() && draw < cross + walk {
+            kings[rng.below(kings.len())]
+        } else {
+            legal[rng.below(legal.len())]
+        };
+        line.push((pos.clone(), mv));
+        let _ = pos.do_move(mv);
+    }
+    line
+}
+
 /// A small deterministic generator (xorshift64*), so a failure is the same
 /// failure on every run and every machine.
 struct Rng(u64);
@@ -232,6 +290,59 @@ pub(super) fn tokens_present(pos: &Position, frame: attic_state::Color) -> Vec<u
         }
     }
     tokens
+}
+
+/// The tokens of `frame` as an `hm` net reads them, written out a different way from the accumulator: when
+/// `frame`'s own king stands on the sixth to ninth file as that frame's owner counts them, the *board is
+/// mirrored left to right* — every piece moved to the square across the board, hands left alone — and the
+/// tokens of that board are listed as ever. No token table's reflection is used: a mirror of the position
+/// is built and numbered by [`tokens_present`], so a wrong `mirror_row` cannot agree with this.
+#[cfg(feature = "sym_hm")]
+pub(super) fn tokens_present_hm(pos: &Position, frame: attic_state::Color) -> Vec<u32> {
+    use attic_state::{Color, Square};
+
+    let king_file = |frame: Color| -> Option<usize> {
+        for index in 0..Square::COUNT as u8 {
+            let sq = Square::from_index(index).expect("a square");
+            if let Some(piece) = pos.board().get(sq)
+                && piece.kind == attic_state::PieceKind::King
+                && piece.color == frame
+            {
+                // The file the owner counts, 1 to 9: a square's file as written is `index / 9 + 1`, and the
+                // white frame reads the board turned half way round.
+                let written = usize::from(index) / 9 + 1;
+                return Some(if frame == Color::Black {
+                    written
+                } else {
+                    10 - written
+                });
+            }
+        }
+        None
+    };
+    // `index / 9 + 1` is the file in YaneuraOu's numbering (file 1 is index 0..9); a king on file `f` as
+    // written is on the sixth to ninth file when `f >= 6`.
+    if !king_file(frame).is_some_and(|file| file >= 6) {
+        return tokens_present(pos, frame);
+    }
+    let mut mirrored = Position::empty();
+    for index in 0..Square::COUNT as u8 {
+        let sq = Square::from_index(index).expect("a square");
+        if let Some(piece) = pos.board().get(sq) {
+            // Same rank, opposite file: in YaneuraOu's numbering `index = (file - 1) * 9 + (rank - 1)`.
+            let across = Square::from_index((8 - index / 9) * 9 + index % 9).expect("a square");
+            mirrored.board_mut().set(across, Some(piece));
+        }
+    }
+    for color in [Color::Black, Color::White] {
+        for kind in crate::tokens::HAND_KINDS {
+            for _ in 0..pos.hand(color).count(kind) {
+                mirrored.hand_mut(color).increment(kind);
+            }
+        }
+    }
+    mirrored.set_side_to_move(pos.side_to_move());
+    tokens_present(&mirrored, frame)
 }
 
 /// The KP and HalfKP shapes number a position's features in the one place there
