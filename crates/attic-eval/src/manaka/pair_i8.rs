@@ -19,7 +19,21 @@
 
 use crate::tokens::FeatureIndex;
 
+#[cfg(any(
+    test,
+    not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))
+))]
 use super::pair::pair_row;
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+use super::pair::row_offsets;
 use super::pair_table::{ROW, SCALED_ROW};
 use super::{PAIR, PAIR_ROWS};
 
@@ -131,10 +145,11 @@ pub(super) unsafe fn cube_totals_avx2(
     // the table is that many rows long.
     assert_eq!(q.len(), PAIR_ROWS * ROW);
     let base = q.as_ptr();
-    let row = |other: FeatureIndex| -> *const u8 {
+    let offsets = row_offsets(token, others, ROW);
+    let row = |at: usize| -> *const u8 {
         // SAFETY: the row starts `pair_row · ROW` in, and the whole row is in the
         // table (asserted above).
-        unsafe { base.add(pair_row(token, other) * ROW) }
+        unsafe { base.add(offsets[at] as usize) }
     };
     let mut even = [_mm256_setzero_ps(); GROUPS];
     let mut odd = [_mm256_setzero_ps(); GROUPS];
@@ -147,13 +162,14 @@ pub(super) unsafe fn cube_totals_avx2(
             *total = _mm256_fmadd_ps(_mm256_mul_ps(level, level), level, *total);
         }
     };
-    let (twos, last) = others.as_chunks::<2>();
-    for &[a, b] in twos {
-        add_row(&mut even, row(a));
-        add_row(&mut odd, row(b));
+    let mut at = 0;
+    while at + 2 <= others.len() {
+        add_row(&mut even, row(at));
+        add_row(&mut odd, row(at + 1));
+        at += 2;
     }
-    for &other in last {
-        add_row(&mut even, row(other));
+    if at < others.len() {
+        add_row(&mut even, row(at));
     }
     let mut out = [0.0f32; ROW];
     for (group, ((chunk, e), o)) in out
@@ -276,10 +292,11 @@ pub(super) unsafe fn scaled_totals_avx2(
 
     assert_eq!(q.len(), PAIR_ROWS * SCALED_ROW);
     let base = q.as_ptr();
-    let row = |other: FeatureIndex| -> *const u8 {
+    let offsets = row_offsets(token, others, SCALED_ROW);
+    let row = |at: usize| -> *const u8 {
         // SAFETY: the row starts `pair_row · SCALED_ROW` in, and the whole row is in
         // the table (asserted above).
-        unsafe { base.add(pair_row(token, other) * SCALED_ROW) }
+        unsafe { base.add(offsets[at] as usize) }
     };
     let mut even = [_mm256_setzero_ps(); GROUPS];
     let mut odd = [_mm256_setzero_ps(); GROUPS];
@@ -307,13 +324,14 @@ pub(super) unsafe fn scaled_totals_avx2(
             *total = _mm256_fmadd_ps(level, white, *total);
         }
     };
-    let (twos, last) = others.as_chunks::<2>();
-    for &[a, b] in twos {
-        add_row(&mut even, row(a));
-        add_row(&mut odd, row(b));
+    let mut at = 0;
+    while at + 2 <= others.len() {
+        add_row(&mut even, row(at));
+        add_row(&mut odd, row(at + 1));
+        at += 2;
     }
-    for &other in last {
-        add_row(&mut even, row(other));
+    if at < others.len() {
+        add_row(&mut even, row(at));
     }
     let mut out = [0.0f32; ROW];
     for ((chunk, e), o) in out.as_chunks_mut::<LANES>().0.iter_mut().zip(even).zip(odd) {

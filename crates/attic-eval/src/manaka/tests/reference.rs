@@ -8,6 +8,8 @@ use super::super::{
     SymNetwork, TOKENS,
 };
 use super::encode::column_of;
+#[cfg(feature = "sym_hm")]
+use super::fixtures::tokens_present_hm;
 use super::fixtures::{tokens_present, upto};
 
 /// The row of the pair `{a, b}` counted out: the pairs with a lower token below
@@ -55,9 +57,26 @@ fn kept(a: u32, b: u32) -> bool {
 /// `clamp(x · gamma, 0, 1)`, each hidden layer is `clamp(b + w · x, 0, 1)` and the
 /// value is the row's output as it is.
 pub(super) fn reference_value(net: &SymNetwork, pos: &Position) -> f64 {
+    reference_value_with(net, pos, cfg!(feature = "sym_hm"))
+}
+
+/// [`reference_value`] with the fold named: `fold` reads each frame as an `hm` net does, and `false` reads the
+/// tokens as they are, whatever the build. The second is what lets a test say what folding changed.
+pub(super) fn reference_value_with(net: &SymNetwork, pos: &Position, fold: bool) -> f64 {
     let mut features = Vec::with_capacity(FEATURE_LEN);
     for color in [pos.side_to_move(), pos.side_to_move().flip()] {
-        let tokens = tokens_present(pos, color);
+        // A net read with `hm` is summed over the tokens of the frame's own fold.
+        #[cfg(feature = "sym_hm")]
+        let tokens = if fold {
+            tokens_present_hm(pos, color)
+        } else {
+            tokens_present(pos, color)
+        };
+        #[cfg(not(feature = "sym_hm"))]
+        let tokens = {
+            let _ = fold;
+            tokens_present(pos, color)
+        };
         // What a block becomes on its way to the first dense layer, with the gain
         // of its `i`-th entry given by `gamma`: multiplied by it and clipped.
         let put = |features: &mut Vec<f64>, block: &[f64], gamma: &dyn Fn(usize) -> f64| {

@@ -1,8 +1,13 @@
 # search-yaneuraou-kp256-nodes100000
 
-YaneuraOu 9.80 (upstream `d47c9bfb`, `YANEURAOU_ENGINE_NNUE_KP256`, `make normal`) が
+YaneuraOu 9.96 (upstream `b707119b`, `YANEURAOU_ENGINE_NNUE_KP256`, `make normal`) が
 `go nodes 100000` で出力したものそのもの。Attic の探索が YaneuraOu と一致することを、
 `crates/attic-protocol/tests/yaneuraou_parity.rs` が確かめる。
+
+局面と選び方は V9.80 のときのまま(同じ 160 個の `idx`)で、YaneuraOu の出力だけを V9.96 で取り直した。
+バイナリは `EXTRA_LDFLAGS=-static` 付きの `make normal`(静的リンクで、`manifest.json` の
+`binary_sha256` はそのバイナリ)。16,384 局面すべてをクラスタの b09 で取り直し、Attic と全行一致を
+確かめてから、160 局面をここに書き出した。
 
 ## 中身
 
@@ -16,6 +21,10 @@ YaneuraOu 9.80 (upstream `d47c9bfb`, `YANEURAOU_ENGINE_NNUE_KP256`, `make normal
   局面は `start_sfens_ply32_cp100.txt`(互角局面集)から、種 20261101 で重複なしに選んだもの。
 
 ## sentinel が守っているもの
+
+**以下の表は V9.80 の fixture で測ったもの**で、V9.96 では測り直していない。sentinel の 32 局面は V9.80 で選んだ
+まま持ち越していて、V9.96 でも同じ修正を守るかどうかは確かめていない(V9.96 の探索では `qsearch.rs` / `tt.rs` /
+`search_movegen.rs` の該当箇所が変わっている)。
 
 16,384 局面で、修正を 1 つずつ外した Attic を同じ fixture と比べた結果。
 
