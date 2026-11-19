@@ -85,6 +85,14 @@ impl PairPrecision {
 }
 
 /// What the table holds.
+///
+/// `Cubes` carries `2 · PAIR` scales inline, which clippy finds large once `PAIR` is 32
+/// (a 272-byte variant beside a 16-byte one). Keeping the scales inline lets the pair
+/// sum read them without another pointer lookup.
+#[cfg_attr(
+    feature = "synn_token_32x2_32_32_pair32_o1_dual",
+    allow(clippy::large_enum_variant)
+)]
 #[derive(Debug)]
 pub(super) enum Cells {
     /// `[PAIR_ROWS][ROW]` halves.

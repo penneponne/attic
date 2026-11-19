@@ -126,3 +126,30 @@ pub(super) const EXPORTED: Exported = Exported {
     rest: "Tokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-272](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[8](PairSum[8](InputSlice[8(128:136)]))))))",
     hash: 0x185437be,
 };
+
+/// From the file `export-nnue` wrote at tideborn's `feat/synn-dual-act` (76418c07) for
+/// this shape's seed-1 initial net (`pair32_d32_o1_h32_h232_dual`, 2026-11-12); the string depends on the
+/// shape alone.
+#[cfg(feature = "synn_token_32x2_32_32_pair32_o1_dual")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[32x2],Network=Dense[1<-128](Skip[32,32](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-128](ClipScaled[32](Newton[1](PowerSum[1](InputSlice[32(0:32)]))),ClipScaled[32](PairSum[32](InputSlice[32(32:64)])))))))",
+    hash: 0xc85a10de,
+};
+
+/// From the file `export-nnue` wrote at tideborn's `feat/synn-dual-act` (76418c07) for
+/// this shape's seed-1 initial net (`pair16_d64_o1_h32_h232_dual`, 2026-11-12); the string depends on the
+/// shape alone.
+#[cfg(feature = "synn_token_64x2_32_32_pair16_o1_dual")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[64x2],Network=Dense[1<-128](Skip[32,32](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-160](ClipScaled[64](Newton[1](PowerSum[1](InputSlice[64(0:64)]))),ClipScaled[16](PairSum[16](InputSlice[16(64:80)])))))))",
+    hash: 0x622da5ff,
+};
+
+/// From the file `export-nnue` wrote at tideborn's `feat/synn-dual-act` (76418c07) for
+/// this shape's seed-1 initial net (`pair24_d32_o1_h32_h232_dual`, 2026-11-12); the string depends on the
+/// shape alone.
+#[cfg(feature = "synn_token_32x2_32_32_pair24_o1_dual")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[32x2],Network=Dense[1<-128](Skip[32,32](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-112](ClipScaled[32](Newton[1](PowerSum[1](InputSlice[32(0:32)]))),ClipScaled[24](PairSum[24](InputSlice[24(32:56)])))))))",
+    hash: 0x97af8a95,
+};

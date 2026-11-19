@@ -7,8 +7,9 @@ use std::sync::OnceLock;
 use attic_state::{Move, Position};
 
 use super::super::{
-    DIM, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_LEN,
-    ORDER, PAIR, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, PairTable, SECOND_INPUT, SymNetwork, TOKENS,
+    DIM, DUAL, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT,
+    MOMENT_LEN, ORDER, PAIR, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, PairTable, SECOND_INPUT, SymNetwork,
+    TOKENS,
 };
 
 /// The synthetic pair table from values drawn in `f32`: rounded to halves the way
@@ -53,7 +54,7 @@ pub(super) fn synthetic() -> &'static SymNetwork {
                 .enumerate()
                 .map(|(i, g)| (1.0 + g) * Gain::order(i / DIM))
                 .collect(),
-            w1: rng.fill(HIDDEN * FEATURE_LEN, 0.3 * Gain::W1),
+            w1: rng.fill(HIDDEN * FEATURE_LEN, 0.3 * Gain::W1 * Gain::w1_width()),
             b1: rng.fill(HIDDEN, 0.3),
             w2: rng.fill(HIDDEN2 * SECOND_INPUT, 0.3 * Gain::W2),
             b2: rng.fill(HIDDEN2, 0.3),
@@ -102,6 +103,18 @@ impl Gain {
     };
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
+
+    /// The dual-head fixture was calibrated on 288 inputs, with a 128-wide embedding and
+    /// 16 pair channels per side. Narrower dual heads need larger weights to exercise the
+    /// square clip's upper rail. Scaling by the ratio of input widths reaches that rail
+    /// where scaling by its square root did not.
+    fn w1_width() -> f32 {
+        if DUAL {
+            (288.0 / FEATURE_LEN as f32).max(1.0)
+        } else {
+            1.0
+        }
+    }
 
     /// The power-sum block of order `k + 1`: the sums grow with the order.
     fn order(k: usize) -> f32 {

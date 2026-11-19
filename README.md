@@ -205,6 +205,9 @@ SFNN の 2 つは、YaneuraOu 側が shielune 版です。遅い原因は調べ�
 | SYNN | `token_128x2_32_32_pair16_o1_r2`      |
 | SYNN | `token_128x2_32_32_pair16_o1_hc`      |
 | SYNN | `token_128x2_32_32_pair16_o1_r4hc`    |
+| SYNN | `token_32x2_32_32_pair32_o1_dual`     |
+| SYNN | `token_64x2_32_32_pair16_o1_dual`     |
+| SYNN | `token_32x2_32_32_pair24_o1_dual`     |
 | SYNN | `token_128x2_32_32_pair16_m8_f2`      |
 | HCE  | `material_17`                         |
 | HCE  | `mobility_107_57`                     |

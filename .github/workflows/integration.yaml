@@ -179,6 +179,9 @@ jobs:
             synn_token_128x2_32_32_pair16_o1_r2 \
             synn_token_128x2_32_32_pair16_o1_hc \
             synn_token_128x2_32_32_pair16_o1_r4hc \
+            synn_token_32x2_32_32_pair32_o1_dual \
+            synn_token_64x2_32_32_pair16_o1_dual \
+            synn_token_32x2_32_32_pair24_o1_dual \
             synn_kp_128x2_32_32 \
             synn_kp_256x2_32_32 \
             synn_token_256x2_32_32 \

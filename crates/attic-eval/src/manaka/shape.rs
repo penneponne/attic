@@ -151,6 +151,15 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(128, 1, 32, 32).pair(16).radius(4)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r2") {
     Dims::new(128, 1, 32, 32).pair(16).radius(2)
+} else if cfg!(feature = "synn_token_32x2_32_32_pair32_o1_dual") {
+    // The dual head with the embedding narrowed to 32 and the pair table widened to 32 channels.
+    Dims::new(32, 1, 32, 32).pair(32).dual()
+} else if cfg!(feature = "synn_token_64x2_32_32_pair16_o1_dual") {
+    // The dual head with the embedding halved to 64, the pair table as it was.
+    Dims::new(64, 1, 32, 32).pair(16).dual()
+} else if cfg!(feature = "synn_token_32x2_32_32_pair24_o1_dual") {
+    // The dual head with the embedding narrowed to 32 and the pair table widened to 24 channels.
+    Dims::new(32, 1, 32, 32).pair(24).dual()
 } else if cfg!(any(
     feature = "synn_token_128x2_32_32_pair16_o1",
     feature = "synn_token_128x2_32_32_pair16_o1_hm"
@@ -344,6 +353,9 @@ const _: () = {
         "synn_token_128x2_32_32_pair16_o1_hc",
         "synn_token_128x2_32_32_pair16_o1_r4hc",
         "synn_token_128x2_32_32_pair16_o1_r2",
+        "synn_token_32x2_32_32_pair32_o1_dual",
+        "synn_token_64x2_32_32_pair16_o1_dual",
+        "synn_token_32x2_32_32_pair24_o1_dual",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
     assert!(
