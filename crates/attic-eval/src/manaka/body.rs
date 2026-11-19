@@ -16,7 +16,7 @@ use super::reader::Reader;
 use super::shape::SQUARES;
 use super::{
     DIM, FEATURE_LEN, FIELD, FirstLayer, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD, HIDDEN, HIDDEN2,
-    MOMENT, MOMENT_LEN, ORDER, PAIR, SymNetwork, TOKENS,
+    MOMENT, MOMENT_LEN, ORDER, PAIR, SECOND_INPUT, SymNetwork, TOKENS,
 };
 
 /// The body of the file, from the first section to the last.
@@ -37,7 +37,7 @@ pub(super) fn read_body(r: &mut Reader<'_>, hash: u32) -> Result<SymNetwork, Nnu
     let gamma = r.f32s(ORDER * DIM)?;
     let w1 = r.halves(HIDDEN * FEATURE_LEN, "w1")?;
     let b1 = r.f32s(HIDDEN)?;
-    let w2 = r.halves(HIDDEN2 * HIDDEN, "w2")?;
+    let w2 = r.halves(HIDDEN2 * SECOND_INPUT, "w2")?;
     let b2 = r.f32s(HIDDEN2)?;
     let value_w = r.f32s(HEAD)?;
     let value_b = r.f32s(1)?[0];

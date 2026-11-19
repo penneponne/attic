@@ -4,9 +4,9 @@
 use super::super::loader::{arch_hash, expected_arch, parse_network};
 use super::super::shape::SQUARES;
 use super::super::{
-    BLOCK_LEN, DIM, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
-    HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, PAIR_ROWS, POWER_LEN,
-    TOKENS, evaluate_value,
+    BLOCK_LEN, DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR,
+    HEAD, HEAD_AT, HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, ORDER, PAIR, PAIR_AT,
+    PAIR_ROWS, POWER_LEN, SECOND_INPUT, TOKENS, evaluate_value,
 };
 use super::encode::{encode, encoded};
 use super::exported::EXPORTED;
@@ -116,13 +116,23 @@ fn the_derived_lengths_agree_with_each_other() {
     );
     assert_eq!(FIELD_LEN, SQUARES * FIELD);
     assert_eq!(SQUARES, 81);
-    assert_eq!(HEAD, HIDDEN2);
+    // The value row reads the second layer, or both layers' doubled activations.
+    assert_eq!(
+        HEAD,
+        match (DUAL, NOSKIP) {
+            (false, _) => HIDDEN2,
+            (true, false) => 2 * (HIDDEN + HIDDEN2),
+            (true, true) => 2 * HIDDEN2,
+        }
+    );
+    assert_eq!(HEAD_AT, if DUAL && NOSKIP { 2 * HIDDEN } else { 0 });
+    assert_eq!(SECOND_INPUT, if DUAL { 2 * HIDDEN } else { HIDDEN });
     assert_eq!(TOKENS, crate::NUM_FEATURES);
     assert_eq!(PAIR_ROWS, if HAS_PAIR { 2_745_996 } else { 0 });
     let net = synthetic();
     assert_eq!(net.embed.len(), TOKENS * DIM);
     assert_eq!(net.w1.len(), HIDDEN * FEATURE_LEN);
-    assert_eq!(net.w2.len(), HIDDEN2 * HIDDEN);
+    assert_eq!(net.w2.len(), HIDDEN2 * SECOND_INPUT);
     assert_eq!(net.b2.len(), HIDDEN2);
     assert_eq!(net.value_w.len(), HEAD);
     assert_eq!(net.pair_gamma.len(), PAIR);
@@ -299,7 +309,7 @@ fn optional_sections(section_one: usize) -> (Vec<(usize, &'static str)>, usize) 
     let dense = 4 * ORDER * DIM
         + 2 * HIDDEN * FEATURE_LEN
         + 4 * HIDDEN
-        + 2 * HIDDEN2 * HIDDEN
+        + 2 * HIDDEN2 * SECOND_INPUT
         + 4 * HIDDEN2
         + 4 * HEAD
         + 4;

@@ -170,6 +170,9 @@ jobs:
           for shape in \
             synn_token_128x2_32_32_pair16 \
             synn_token_128x2_32_32_pair16_o1 \
+            synn_token_128x2_32_32_pair16_o1_dual \
+            synn_token_128x2_32_32_pair16_o1_dual_noskip \
+            synn_token_128x2_32_32_pair16_o1_dual_nosqr \
             synn_token_128x2_32_32_pair8_o1 \
             synn_token_128x2_32_32_pair16_o1_hm \
             synn_token_128x2_32_32_pair16_o1_r4 \

@@ -2,13 +2,16 @@
 
 use attic_state::{Color, Position, parse_sfen};
 
-use super::super::forward::{dense_clip, features_from_sums};
+#[cfg(not(feature = "sym_dual"))]
+use super::super::forward::dense_clip;
+use super::super::forward::features_from_sums;
+#[cfg(feature = "sym_dual")]
+use super::super::forward::{dense_pre, sqr_clip};
 use super::super::{
-    Accumulator, BLOCK_LEN, DIM, FEATURE_LEN, FIELD_AT, FIELD_LEN, FinnyCache, HAS_FIELD,
-    HAS_MOMENT, HAS_PAIR, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT,
-    W1Precision, evaluate_pre, evaluate_value, value_from_sums,
+    Accumulator, FEATURE_LEN, FinnyCache, HIDDEN, HIDDEN2, W1Precision, evaluate_pre,
+    evaluate_value, value_from_sums,
 };
-use super::fixtures::{assert_close, assert_close_relative, game, least, random_game, synthetic};
+use super::fixtures::{assert_close, assert_close_relative, game, random_game, synthetic};
 use super::reference::reference_value;
 use crate::MoveDelta;
 #[cfg(feature = "sym_token")]
@@ -68,8 +71,10 @@ fn the_value_is_linear() {
 /// first is its clip: a unit of `3` arrives as `1`, and of `-3` as `0`. In the
 /// second the second layer's own bias drives it past each rail from either side,
 /// which the first scenario's small products never reach.
+#[cfg(not(feature = "sym_dual"))]
 #[test]
 fn a_hidden_layer_clips_at_both_ends() {
+    use super::fixtures::least;
     let pos = Position::startpos();
     let clip = |x: f64| x.clamp(0.0, 1.0);
     let units = least(HIDDEN, HIDDEN2);
@@ -111,9 +116,160 @@ fn a_hidden_layer_clips_at_both_ends() {
     }
 }
 
+/// Both hidden layers of a dual head are read twice, as a square clip and as a plain clip, and
+/// the second layer and the value row read the right halves. Built so that the answer is a
+/// handful of numbers: the first layer reads nothing (`w1 = 0`), so its units are its biases;
+/// the second reads one chosen activation per unit, and the value row sums everything.
+///
+/// The biases are picked to land every unit somewhere a clip can tell from the square: `0.5`
+/// squares to `0.25` and clips to `0.5`, `-0.5` squares to `0.25` and clips to `0`, `2` is
+/// on the rail both ways, `-2` squares to the rail and clips to zero.
+///
+/// The two ablations are read off the shape's constants: under `nosqr` the first half of a pair is
+/// the plain clip, and under `noskip` the value row starts at the second layer's half (`HEAD_AT`),
+/// so nothing of the first layer can be read and its part of the test is not run.
+#[cfg(feature = "sym_dual")]
+#[test]
+fn a_dual_head_reads_each_layer_as_a_square_clip_and_a_plain_clip() {
+    use super::super::{HEAD, HEAD_AT, NOSKIP, NOSQR, SECOND_INPUT};
+    let pos = Position::startpos();
+    let first = [0.5f32, -0.5, 2.0, -2.0];
+    let second = [0.5f32, -0.5, 2.0, -2.0];
+    let mut net = synthetic().replicate();
+    net.w1.fill(0.0);
+    net.w2.fill(0.0);
+    net.value_w.fill(0.0);
+    net.value_b = 0.0;
+    for (i, b) in net.b1.iter_mut().enumerate() {
+        *b = first[i % 4];
+    }
+    for (i, b) in net.b2.iter_mut().enumerate() {
+        *b = second[i % 4];
+    }
+    let cl = |z: f32| f64::from(z.clamp(0.0, 1.0));
+    // The first half of a pair: the square, or the plain clip again under `nosqr`.
+    let half = |z: f32| {
+        if NOSQR {
+            cl(z)
+        } else {
+            f64::from((z * z).clamp(0.0, 1.0))
+        }
+    };
+    // Where an entry of `[a1 ‖ a2]` is in the value row.
+    let at = |entry: usize| entry - HEAD_AT;
+
+    if !NOSKIP {
+        // Layer one's two halves alone: unit 1's first half and unit 2's clip.
+        net.value_w[at(1)] = 1.0;
+        net.value_w[at(HIDDEN + 2)] = 1.0;
+        let got = f64::from(evaluate_value(&net, &pos));
+        let want = half(net.b1[1]) + cl(net.b1[2]);
+        assert!(
+            (got - want).abs() < 1e-6,
+            "first layer: {got} against {want}"
+        );
+        net.value_w.fill(0.0);
+    }
+
+    // Layer two's, in its own place after layer one's 2 * HIDDEN.
+    net.value_w[at(SECOND_INPUT + 1)] = 2.0;
+    net.value_w[at(SECOND_INPUT + HIDDEN2 + 3)] = 3.0;
+    let got = f64::from(evaluate_value(&net, &pos));
+    let want = 2.0 * half(net.b2[1]) + 3.0 * cl(net.b2[3]);
+    assert!(
+        (got - want).abs() < 1e-6,
+        "second layer: {got} against {want}"
+    );
+    net.value_w.fill(0.0);
+
+    // W2 reads the first halves in its first `HIDDEN` columns and the clips in the next `HIDDEN`:
+    // row 0 takes the first half of layer-one unit 0 and row 1 the clip of unit 0, at a tenth.
+    net.b2.fill(0.0);
+    net.w2[0] = 0.1;
+    net.w2[SECOND_INPUT + HIDDEN] = 0.1;
+    net.value_w[at(SECOND_INPUT)] = 1.0;
+    net.value_w[at(SECOND_INPUT + 1)] = 1.0;
+    let want = half(0.1 * half(net.b1[0]) as f32) + half(0.1 * cl(net.b1[0]) as f32);
+    let got = f64::from(evaluate_value(&net, &pos));
+    assert!((got - want).abs() < 1e-6, "W2: {got} against {want}");
+    assert_eq!(
+        HEAD,
+        if NOSKIP {
+            2 * HIDDEN2
+        } else {
+            2 * (HIDDEN + HIDDEN2)
+        }
+    );
+}
+
+/// The test net lets the squares be seen: both layers' sums sit inside `(-1, 1)` often enough
+/// for `z²` to be a number between the rails, and outside it often enough to reach them, so a
+/// reader that dropped the square (or took `|z|`) would not agree with the reference.
+#[cfg(feature = "sym_dual")]
+#[test]
+fn a_test_net_exercises_the_square_clip_in_both_layers() {
+    let net = synthetic();
+    let mut tally = [[0usize; 3]; 2];
+    // Below `-1`, inside `[-1, 1]`, above `1`: the square is on the rail only outside.
+    let bucket = |z: f32| match z {
+        z if z < -1.0 => 0,
+        z if z > 1.0 => 2,
+        _ => 1,
+    };
+    let mut negative_inside = 0usize;
+    for (pos, _) in game(30) {
+        let mut acc = Accumulator::new();
+        acc.refresh(net, &pos);
+        let mut features = [0.0f32; FEATURE_LEN];
+        features_from_sums(net, &acc, pos.side_to_move(), &mut features);
+        let mut z1 = [0.0f32; HIDDEN];
+        dense_pre(&net.w1, &net.b1, &features, &mut z1);
+        for &z in &z1 {
+            tally[0][bucket(z)] += 1;
+            negative_inside += usize::from((-1.0..0.0).contains(&z));
+        }
+        let mut a1 = [0.0f32; super::super::SECOND_INPUT];
+        let (squares, clips) = a1.split_at_mut(HIDDEN);
+        for ((sq, cl), &z) in squares.iter_mut().zip(clips).zip(&z1) {
+            *sq = if super::super::NOSQR {
+                z.clamp(0.0, 1.0)
+            } else {
+                sqr_clip(z)
+            };
+            *cl = z.clamp(0.0, 1.0);
+        }
+        let mut z2 = [0.0f32; HIDDEN2];
+        dense_pre(&net.w2, &net.b2, &a1, &mut z2);
+        for &z in &z2 {
+            tally[1][bucket(z)] += 1;
+            negative_inside += usize::from((-1.0..0.0).contains(&z));
+        }
+    }
+    for (layer, [below, inside, above]) in tally.iter().enumerate() {
+        println!("sum {layer}: {below} below -1, {inside} in [-1, 1], {above} above 1");
+        let total = below + inside + above;
+        assert!(
+            *inside * 10 >= total,
+            "sum {layer}: nearly all outside [-1, 1]"
+        );
+        assert!(
+            *below + *above > 0,
+            "sum {layer}: the square's rail was never reached"
+        );
+    }
+    // Where the square and the plain clip disagree most: a sum below zero is zero to the clip
+    // and a positive number to the square.
+    assert!(negative_inside > 0, "no sum fell in [-1, 0)");
+}
+
 /// What the head reads: `(name, start, length)` of every block in one
 /// perspective's share, at the offsets `shape.rs` gives.
+#[cfg(not(feature = "sym_dual"))]
 fn blocks() -> Vec<(String, usize, usize)> {
+    use super::super::{
+        DIM, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT_AT, MOMENT_LEN, ORDER,
+        PAIR, PAIR_AT,
+    };
     let mut blocks = Vec::new();
     for k in 0..ORDER {
         blocks.push((format!("e{}", k + 1), k * DIM, DIM));
@@ -135,8 +291,10 @@ fn blocks() -> Vec<(String, usize, usize)> {
 /// other, and a clip that was never reached (or only ever reached from one side)
 /// is a clip nobody tested. So: every block has entries strictly inside `(0, 1)`
 /// in a good share of its positions, and every block reaches both rails.
+#[cfg(not(feature = "sym_dual"))]
 #[test]
 fn a_test_net_exercises_the_clip_in_every_block_and_layer() {
+    use super::super::BLOCK_LEN;
     let net = synthetic();
     let mut tally: Vec<(String, usize, usize, usize)> = blocks()
         .into_iter()

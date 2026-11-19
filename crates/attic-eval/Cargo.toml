@@ -72,6 +72,9 @@ nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
 #   sym_token            ... whose features are Manaka's own token space (2,344 rows,
 #                        nothing crossed with anything). The only space a pair
 #                        table, a second moment or a square field can exist in
+#   sym_dual             ... whose hidden layers are read twice, as a square clip beside a plain
+#                        one (`DUAL` in `src/manaka/shape.rs`); with the head's ablations `noskip`
+#                        and `nosqr` named by the shape, not by a feature of their own
 #   sym_hm               ... read with `hm`: each frame mirrored left to right when its own king stands
 #                        on the sixth to ninth file (`HM` in `src/manaka/shape.rs`); token space only
 #   hce                  every hand-crafted shape. Unlike the others it also
@@ -96,6 +99,7 @@ nnue_halfkp = []
 sym = []
 sym_kp = ["sym"]
 sym_halfkp = ["sym"]
+sym_dual = []
 sym_hm = []
 sym_token = ["sym"]
 hce = []
@@ -134,6 +138,9 @@ hce = []
 #   synn_halfkp_128x2_32_32                halfkp_pair0_d128_o3_h32_h232
 #   synn_token_128x2_32_32_pair16          pair16_d128_o3_h32_h232
 #   synn_token_128x2_32_32_pair16_o1       pair16_d128_o1_h32_h232
+#   synn_token_128x2_32_32_pair16_o1_dual  pair16_d128_o1_h32_h232_dual
+#   synn_token_128x2_32_32_pair16_o1_dual_noskip  pair16_d128_o1_h32_h232_dual_noskip
+#   synn_token_128x2_32_32_pair16_o1_dual_nosqr  pair16_d128_o1_h32_h232_dual_nosqr
 #   synn_token_128x2_32_32_pair8_o1        pair8_d128_o1_h32_h232 (the pair table half as wide)
 #   synn_token_128x2_32_32_pair16_o1_hm    pair16_d128_o1_h32_h232_hm (the file says FoldedTokens: each frame is read
 #                                          mirrored when its own king is on files 6 to 9)
@@ -152,6 +159,9 @@ synn_kp_256x2_32_32 = ["sym_kp"]
 synn_halfkp_128x2_32_32 = ["sym_halfkp"]
 synn_token_128x2_32_32_pair16 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_dual = ["sym_token", "sym_dual"]
+synn_token_128x2_32_32_pair16_o1_dual_noskip = ["sym_token", "sym_dual"]
+synn_token_128x2_32_32_pair16_o1_dual_nosqr = ["sym_token", "sym_dual"]
 synn_token_128x2_32_32_pair8_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
 synn_token_128x2_32_32_pair16_o1_r4 = ["sym_token"]

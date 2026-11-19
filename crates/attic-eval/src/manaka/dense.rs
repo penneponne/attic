@@ -318,6 +318,17 @@ pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// `weights` is `[out.len()][input.len()]`, and every row's sum is [`dot`]'s.
 pub(super) fn dense_clip(weights: &[f32], bias: &[f32], input: &[f32], out: &mut [f32]) {
+    dense_with::<true>(weights, bias, input, out);
+}
+
+/// [`dense_clip`] without the clip: `out[row] = bias[row] + weights[row] · input`, for a head
+/// that reads the sum itself.
+pub(super) fn dense_pre(weights: &[f32], bias: &[f32], input: &[f32], out: &mut [f32]) {
+    dense_with::<false>(weights, bias, input, out);
+}
+
+fn dense_with<const CLIP: bool>(weights: &[f32], bias: &[f32], input: &[f32], out: &mut [f32]) {
+    let act = |z: f32| if CLIP { z.clamp(0.0, 1.0) } else { z };
     let n = input.len();
     debug_assert_eq!(weights.len(), out.len() * n);
     debug_assert_eq!(bias.len(), out.len());
@@ -326,12 +337,12 @@ pub(super) fn dense_clip(weights: &[f32], bias: &[f32], input: &[f32], out: &mut
     while at + ROWS <= out.len() {
         let sums = dots_block(std::array::from_fn(|r| row(at + r)), input);
         for (r, sum) in sums.into_iter().enumerate() {
-            out[at + r] = (bias[at + r] + sum).clamp(0.0, 1.0);
+            out[at + r] = act(bias[at + r] + sum);
         }
         at += ROWS;
     }
     while at < out.len() {
-        out[at] = (bias[at] + dot(row(at), input)).clamp(0.0, 1.0);
+        out[at] = act(bias[at] + dot(row(at), input));
         at += 1;
     }
 }

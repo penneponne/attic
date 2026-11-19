@@ -122,13 +122,25 @@ impl QuantW1 {
         // one call to the next: a `Vec` would be an allocation per node, and a fresh
         // array a clear per node. `quantize_input` writes every entry, the padding
         // included, so what the last call left is never read.
-        INPUT.with_borrow_mut(|x| self.layer_clip_with(input, bias, out, x));
+        INPUT.with_borrow_mut(|x| self.layer_with::<true>(input, bias, out, x));
+    }
+
+    /// `out[row] = bias[row] + weights[row] · input`: [`QuantW1::layer_clip`] without the
+    /// clip, for a head that reads the sum itself (the dual head squares it before it clips).
+    pub fn layer_pre(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
+        INPUT.with_borrow_mut(|x| self.layer_with::<false>(input, bias, out, x));
     }
 
     /// [`QuantW1::layer_clip`] with the buffer for the quantised input supplied, which
     /// has to be one row's padded width (`stride`). Split out so that the tests can
     /// run a layer of any width.
-    fn layer_clip_with(&self, input: &[f32], bias: &[f32], out: &mut [f32], x: &mut [i16]) {
+    fn layer_with<const CLIP: bool>(
+        &self,
+        input: &[f32],
+        bias: &[f32],
+        out: &mut [f32],
+        x: &mut [i16],
+    ) {
         debug_assert_eq!(input.len(), self.cols);
         debug_assert_eq!(out.len(), self.rows);
         debug_assert_eq!(bias.len(), self.rows);
@@ -138,18 +150,27 @@ impl QuantW1 {
         let row = |at: usize| &self.w[at * self.stride..(at + 1) * self.stride];
         let mut at = 0;
         while at + ROWS <= self.rows {
-            block(
-                std::array::from_fn(|r| row(at + r)),
-                x,
-                &self.scale[at..at + ROWS],
-                &bias[at..at + ROWS],
-                &mut out[at..at + ROWS],
-            );
+            if CLIP {
+                block(
+                    std::array::from_fn(|r| row(at + r)),
+                    x,
+                    &self.scale[at..at + ROWS],
+                    &bias[at..at + ROWS],
+                    &mut out[at..at + ROWS],
+                );
+            } else {
+                let sums = dots::<ROWS>(std::array::from_fn(|r| row(at + r)), x);
+                for (r, sum) in sums.into_iter().enumerate() {
+                    let z = bias[at + r] + sum as f32 * self.scale[at + r];
+                    out[at + r] = z;
+                }
+            }
             at += ROWS;
         }
         while at < self.rows {
             let sum = dots::<1>([row(at)], x)[0];
-            out[at] = (bias[at] + sum as f32 * self.scale[at]).clamp(0.0, 1.0);
+            let z = bias[at] + sum as f32 * self.scale[at];
+            out[at] = if CLIP { z.clamp(0.0, 1.0) } else { z };
             at += 1;
         }
     }
@@ -158,7 +179,7 @@ impl QuantW1 {
     #[cfg(test)]
     pub(super) fn layer_clip_any_width(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
         let mut x = vec![0i16; self.stride];
-        self.layer_clip_with(input, bias, out, &mut x);
+        self.layer_with::<true>(input, bias, out, &mut x);
     }
 
     /// The `i32` total of one row against an already-quantised input, for the tests.

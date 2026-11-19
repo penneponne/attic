@@ -17,12 +17,12 @@ use attic_state::Color;
 
 use super::dense;
 use super::{
-    Accumulator, BLOCK_LEN, DIM, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer, HAS_FIELD,
-    HAS_MOMENT, HAS_PAIR, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, ORDER, PAIR, PAIR_AT, POWER_LEN,
-    SymNetwork,
+    Accumulator, BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD_AT, FIELD_LEN, FirstLayer,
+    HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD_AT, HIDDEN, HIDDEN2, MOMENT_AT, MOMENT_LEN, NOSQR, ORDER,
+    PAIR, PAIR_AT, POWER_LEN, SymNetwork,
 };
 
-pub(super) use dense::dense_clip;
+pub(super) use dense::{dense_clip, dense_pre};
 
 /// The group of channels `power_blocks` works on at once: an AVX2 register of `f32`.
 const LANES: usize = 8;
@@ -292,6 +292,10 @@ pub(super) fn value_from_sums(net: &SymNetwork, acc: &Accumulator, stm: Color) -
         features.fill(f32::NAN);
         features_from_sums(net, acc, stm, features);
 
+        if DUAL {
+            return dual_value(net, features);
+        }
+
         let mut hidden = [0.0f32; HIDDEN];
         match &net.first {
             FirstLayer::F32 => dense_clip(&net.w1, &net.b1, features, &mut hidden),
@@ -317,6 +321,54 @@ thread_local! {
     /// at this size the clear is a call to the C library's `memset`, musl's in the static build the lab
     /// plays, and with the `i16` layer's own buffer it came to two percent of a node.
     static FEATURES: RefCell<[f32; FEATURE_LEN]> = const { RefCell::new([0.0; FEATURE_LEN]) };
+}
+
+/// `clamp(z², 0, 1)`: Stockfish's `SqrClippedReLU`. `z²` is not negative, so the lower bound
+/// never fires; it is written as the clip it is.
+#[inline]
+pub(super) fn sqr_clip(z: f32) -> f32 {
+    (z * z).clamp(0.0, 1.0)
+}
+
+/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` into `out`, which is twice as long as `z`. In the `nosqr`
+/// ablation the first half is the plain clip again.
+fn double(z: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 2 * z.len());
+    let (firsts, clips) = out.split_at_mut(z.len());
+    for ((first, clip), &z) in firsts.iter_mut().zip(clips).zip(z) {
+        *first = if NOSQR {
+            z.clamp(0.0, 1.0)
+        } else {
+            sqr_clip(z)
+        };
+        *clip = z.clamp(0.0, 1.0);
+    }
+}
+
+/// The dual head: both hidden layers read as a square clip beside a plain clip, and the value
+/// row over the activations of both, `[a1 ‖ a2]`.
+///
+/// The first layer is whichever [`FirstLayer`] the network runs, asked for its sum before any
+/// clip; the rest is `f32` in the same lanes as the single head's. The trainer's
+/// `manaka_core::eval` is the definition, and this is its arithmetic step for step.
+fn dual_value(net: &SymNetwork, features: &[f32; FEATURE_LEN]) -> f32 {
+    let mut z1 = [0.0f32; HIDDEN];
+    match &net.first {
+        FirstLayer::F32 => dense_pre(&net.w1, &net.b1, features, &mut z1),
+        FirstLayer::I16(q) => q.layer_pre(features, &net.b1, &mut z1),
+        FirstLayer::I8(q) => q.layer_pre(features, &net.b1, &mut z1),
+    }
+
+    let mut head = [0.0f32; DOUBLED];
+    let (first, second) = head.split_at_mut(2 * HIDDEN);
+    double(&z1, first);
+
+    let mut z2 = [0.0f32; HIDDEN2];
+    dense_pre(&net.w2, &net.b2, first, &mut z2);
+    double(&z2, second);
+
+    // The value row reads `[a1 ‖ a2]`, or the second layer's half alone under `noskip`.
+    net.value_b + dense::dot(&net.value_w, &head[HEAD_AT..])
 }
 
 #[cfg(test)]

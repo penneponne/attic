@@ -4,8 +4,8 @@ use attic_state::Position;
 
 use super::super::shape::SQUARES;
 use super::super::{
-    DIM, FEATURE_LEN, FIELD, HAND_CUT, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR,
-    PAIR_RADIUS, SymNetwork, TOKENS,
+    DIM, DUAL, FEATURE_LEN, FIELD, HAND_CUT, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD_AT, MOMENT,
+    NOSQR, ORDER, PAIR, PAIR_RADIUS, SymNetwork, TOKENS,
 };
 use super::encode::column_of;
 #[cfg(feature = "sym_hm")]
@@ -60,7 +60,9 @@ fn kept(a: u32, b: u32) -> bool {
 ///
 /// The head is then the plain textbook form of the definition: each block is
 /// `clamp(x · gamma, 0, 1)`, each hidden layer is `clamp(b + w · x, 0, 1)` and the
-/// value is the row's output as it is.
+/// value is the row's output as it is. A dual head reads each layer's sum `z` as
+/// `[clamp(z², 0, 1) ‖ clamp(z, 0, 1)]` and the value row reads both layers' reads
+/// side by side.
 pub(super) fn reference_value(net: &SymNetwork, pos: &Position) -> f64 {
     reference_value_with(net, pos, cfg!(feature = "sym_hm"))
 }
@@ -175,7 +177,8 @@ pub(super) fn reference_value_with(net: &SymNetwork, pos: &Position, fold: bool)
         }
     }
 
-    let dense = |w: &[f32], b: &[f32], x: &[f64]| -> Vec<f64> {
+    // The sum of a layer, before any activation.
+    let pre = |w: &[f32], b: &[f32], x: &[f64]| -> Vec<f64> {
         b.iter()
             .enumerate()
             .map(|(row, b)| {
@@ -184,11 +187,30 @@ pub(super) fn reference_value_with(net: &SymNetwork, pos: &Position, fold: bool)
                     .zip(x)
                     .map(|(w, x)| f64::from(*w) * x)
                     .sum();
-                (f64::from(*b) + dot).clamp(0.0, 1.0)
+                f64::from(*b) + dot
             })
             .collect()
     };
-    let head = dense(&net.w2, &net.b2, &dense(&net.w1, &net.b1, &features));
+    let clip = |z: Vec<f64>| -> Vec<f64> { z.into_iter().map(|z| z.clamp(0.0, 1.0)).collect() };
+    let head = if DUAL {
+        // `nosqr` reads the plain clip in the square's place.
+        let double = |z: &[f64]| -> Vec<f64> {
+            z.iter()
+                .map(|z| if NOSQR { *z } else { z * z }.clamp(0.0, 1.0))
+                .chain(z.iter().map(|z| z.clamp(0.0, 1.0)))
+                .collect()
+        };
+        let first = double(&pre(&net.w1, &net.b1, &features));
+        let second = double(&pre(&net.w2, &net.b2, &first));
+        // `noskip` leaves the first layer's half out of what the value row reads.
+        [first, second].concat().split_off(HEAD_AT)
+    } else {
+        clip(pre(
+            &net.w2,
+            &net.b2,
+            &clip(pre(&net.w1, &net.b1, &features)),
+        ))
+    };
     let dot: f64 = net
         .value_w
         .iter()

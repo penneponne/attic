@@ -73,6 +73,15 @@
 //! linear value row reduce to a scalar. The value row reads the second layer,
 //! which is [`HEAD`] wide. There is no norm and no `tanh`.
 //!
+//! A *dual* head (the `_dual` shapes, [`DUAL`]) reads each hidden layer twice, as Stockfish's
+//! `SqrClippedReLU` and `ClippedReLU` side by side: with `z1 = W1 x + b1`,
+//! `a1 = [clamp(z1², 0, 1) ‖ clamp(z1, 0, 1)]`, `z2 = W2 a1 + b2` and `a2` likewise, the value
+//! is `value_w · [a1 ‖ a2] + value_b`. `W2` is `[HIDDEN2][2·HIDDEN]` and the value row is
+//! `2·(HIDDEN + HIDDEN2)` wide. Two ablations are shapes of their own: `noskip` reads the second
+//! layer's half alone (`HEAD` is `2·HIDDEN2` and `HEAD_AT` where it starts), and `nosqr` reads the
+//! plain clip in the square's place, so that only the square is taken out. Only the first layer is ever an integer layer, and it hands
+//! over its sum unclipped (`layer_pre`); everything after it is `f32`.
+//!
 //! Its value is in NNUE's units. The row's output is multiplied by [`RAW_SCALE`]
 //! and divided by `fv_scale` as NNUE's is, so one unit is about 508 at the default
 //! scale. Nothing clamps it here, and NNUE's `evaluate_with` does not clamp its
@@ -119,9 +128,10 @@ pub use pair_table::{PairPrecision, PairTable};
 pub use qdense::QuantW1;
 pub use qdense_i8::QuantW1I8;
 pub use shape::{
-    BLOCK_LEN, DIM, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAND_CUT, HAS_FIELD, HAS_MOMENT,
-    HAS_PAIR, HEAD, HIDDEN, HIDDEN2, HM, MAX_PAIR_RADIUS, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER,
-    PAIR, PAIR_AT, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, POWER_LEN, TOKENS,
+    BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAND_CUT, HAS_FIELD,
+    HAS_MOMENT, HAS_PAIR, HEAD, HEAD_AT, HIDDEN, HIDDEN2, HM, MAX_PAIR_RADIUS, MOMENT, MOMENT_AT,
+    MOMENT_LEN, NOSKIP, NOSQR, ORDER, PAIR, PAIR_AT, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, POWER_LEN,
+    SECOND_INPUT, TOKENS,
 };
 
 /// A loaded network, with the tables this shape actually reads.
@@ -142,11 +152,11 @@ pub struct SymNetwork {
     pub w1: Vec<f32>,
     /// `[HIDDEN]`.
     pub b1: Vec<f32>,
-    /// `[HIDDEN2][HIDDEN]`.
+    /// `[HIDDEN2][SECOND_INPUT]`: `HIDDEN` wide, or twice that for a dual head.
     pub w2: Vec<f32>,
     /// `[HIDDEN2]`.
     pub b2: Vec<f32>,
-    /// `[HEAD]`.
+    /// `[HEAD]`: the second layer, or both layers' doubled activations for a dual head.
     pub value_w: Vec<f32>,
     pub value_b: f32,
     /// `[PAIR]` — the gain on each pair channel.

@@ -82,6 +82,34 @@ pub(super) const EXPORTED: Exported = Exported {
     hash: 0x00191180,
 };
 
+/// From the file `manaka-train export-nnue` wrote for this shape's seed-1 initial net
+/// (`pair16_d128_o1_h32_h232_dual`, tideborn branch `feat/synn-dual-act`, 2026-11-12); the
+/// string depends on the shape alone. The two hidden layers are `DualClippedReLU` — a square
+/// clip beside a plain one — the second layer reads `2 · 32`, and `Skip` joins the activations
+/// of both layers into the value row, which is `2 · (32 + 32)` wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-128](Skip[32,32](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)])))))))",
+    hash: 0xc450c6de,
+};
+
+/// The first ablation of the dual head, from the file `export-nnue` wrote for its seed-1 initial net
+/// (`pair16_d128_o1_h32_h232_dual_noskip`, tideborn `0694e7b5`, 2026-11-12). There is no `Skip`: the value
+/// row reads the second layer's `[sqr || clip]` alone, 64 wide.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual_noskip")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-64](DualClippedReLU[32](Dense[32<-64](DualClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)]))))))",
+    hash: 0xf4d918d5,
+};
+
+/// The second ablation, from the same export of `pair16_d128_o1_h32_h232_dual_nosqr`: the dual head's
+/// widths and `Skip`, with `TwinClippedReLU` (a plain clip twice) where the dual head has the square.
+#[cfg(feature = "synn_token_128x2_32_32_pair16_o1_dual_nosqr")]
+pub(super) const EXPORTED: Exported = Exported {
+    rest: "Tokens[128x2],Network=Dense[1<-128](Skip[32,32](TwinClippedReLU[32](Dense[32<-64](TwinClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)])))))))",
+    hash: 0xad8bcc76,
+};
+
 /// From the file `export-nnue` wrote for a net trained at this shape with `hm` (QS 1000M, 2026-11-12,
 /// tideborn `feat/synn-dual-act` ee7bf590): the string is the plain pair16 o1's with `FoldedTokens` where it
 /// says `Tokens`, and nothing else. A build without hm refuses this string and this build refuses the plain one.
