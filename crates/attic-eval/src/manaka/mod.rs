@@ -97,6 +97,8 @@
 mod accumulator;
 mod body;
 mod cache;
+#[cfg(feature = "clip_stats")]
+pub mod clip_stats;
 mod dense;
 #[cfg(feature = "sym_token")]
 mod field;
@@ -106,6 +108,8 @@ mod loader;
 mod moment;
 #[cfg(feature = "sym_token")]
 mod pair;
+#[cfg(feature = "sym_token")]
+mod pair_i8;
 mod pair_table;
 mod qdense;
 mod qdense_i8;
@@ -120,13 +124,13 @@ pub use accumulator::Accumulator;
 pub use cache::FinnyCache;
 use forward::value_from_sums;
 pub use loader::{load_network, load_network_with_warnings};
-pub use pair_table::PairTable;
+pub use pair_table::{PairPrecision, PairTable};
 pub use qdense::QuantW1;
 pub use qdense_i8::QuantW1I8;
 pub use shape::{
     BLOCK_LEN, DIM, DOUBLED, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT,
-    HAS_PAIR, HEAD, HEAD_AT, HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, NOSQR, ORDER,
-    PAIR, PAIR_AT, PAIR_ROWS, POWER_LEN, SECOND_INPUT, TOKENS,
+    HAS_PAIR, HEAD, HEAD_AT, HIDDEN, HIDDEN2, HM, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, NOSQR,
+    ORDER, PAIR, PAIR_AT, PAIR_ROWS, POWER_LEN, SECOND_INPUT, TOKENS,
 };
 
 /// A loaded network, with the tables this shape actually reads.
@@ -277,6 +281,13 @@ impl SymNetwork {
             field: self.field.clone(),
             first: self.first.clone(),
         }
+    }
+
+    /// Hold the pair table at `precision`; see [`PairPrecision`]. The default is the
+    /// halves of the file, and [`load_network`] changes that only if
+    /// `ATTIC_SYNN_PAIR` says so.
+    pub fn use_pair_precision(&mut self, precision: PairPrecision) {
+        self.pair.use_precision(precision);
     }
 
     /// Run the first layer at `precision`: `w1` itself, or an integer layer made

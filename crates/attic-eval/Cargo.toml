@@ -33,6 +33,11 @@ sfnn_halfkahm2_1536_15_32_k3k3 = ["sfnn"]
 sfnn_halfkahm2_1024_15_64_progress8kpabs = ["sfnn_progress"]
 sfnn_halfkahm2_1024_15_64_progress8ek = ["sfnn_progress_ek"]
 sfnn_halfkahm2_2304_15_64_progress8ek = ["sfnn_progress_ek"]
+# Sirius's network, read as it ships: HalfKA_hm2 plus the threat features (the
+# attacks between the pieces on the board), eight layer stacks chosen by an
+# integer game-phase sum and blended across a stack boundary. It has no
+# `progress.bin`, and its output scale is 26. See `src/threat.rs` and `src/gp.rs`.
+sfnn_halfkahm2_threat_1024_15_64_8gp = ["sfnn_threat"]
 # YaneuraOu's standard shapes. One dense stack, no bucketing, and the
 # perspectives concatenated rather than multiplied — see `NetDims::KP256`. The
 # name spells the architecture the way YaneuraOu does: feature set, transformer
@@ -51,6 +56,9 @@ nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
 #                        stack (NAGISA V4, and the 1024 net tatara trains with the
 #                        entering-king bucket). Without it the ninth is read and
 #                        never used, because V3 was trained with eight buckets.
+#   sfnn_threat          ... that adds the threat features to the accumulator and picks
+#                        its stack from an integer game-phase sum (Sirius). Not a
+#                        progress shape: no `progress.bin`
 #   nnue_standard        every YaneuraOu standard shape
 #   nnue_kp              ... whose features are K+P
 #   nnue_halfkp          ... whose features are `HalfKP`
@@ -67,12 +75,24 @@ nnue_halfkp_768x2_16_64 = ["nnue_standard", "nnue_halfkp"]
 #   sym_dual             ... whose hidden layers are read twice, as a square clip beside a plain
 #                        one (`DUAL` in `src/manaka/shape.rs`); with the head's ablations `noskip`
 #                        and `nosqr` named by the shape, not by a feature of their own
+#   sym_hm               ... read with `hm`: each frame mirrored left to right when its own king stands
+#                        on the sixth to ninth file (`HM` in `src/manaka/shape.rs`); token space only
 #   hce                  every hand-crafted shape. Unlike the others it also
 #                        stands for them in the guard's pairwise lists, because
 #                        an HCE shape is exactly what `hce` being on means.
+# Count how often each layer of a SYNN head sits on its floor or ceiling, and answer the
+# `clipstats` command with it. A measuring build: the counters are atomics added to on every
+# evaluation, and a build without the feature has none of them. See `manaka/clip_stats.rs`.
+clip_stats = []
+# A checking build for the threat shape: every `do_move` rebuilds the accumulator from
+# scratch instead of deriving it from the parent. A search then has to be identical with
+# and without it, which is how the incremental update is checked end to end. Off in every
+# build that is not made to check; it only means something under the threat shape.
+threat_force_refresh = []
 sfnn = []
 sfnn_progress = ["sfnn"]
 sfnn_progress_ek = ["sfnn_progress"]
+sfnn_threat = ["sfnn"]
 nnue_standard = []
 nnue_kp = []
 nnue_halfkp = []
@@ -80,6 +100,7 @@ sym = []
 sym_kp = ["sym"]
 sym_halfkp = ["sym"]
 sym_dual = []
+sym_hm = []
 sym_token = ["sym"]
 hce = []
 # Manaka's own shapes: `SYNN`, SYM's sums behind NNUE's arithmetic. They read the
@@ -120,6 +141,9 @@ hce = []
 #   synn_token_128x2_32_32_pair16_o1_dual  pair16_d128_o1_h32_h232_dual
 #   synn_token_128x2_32_32_pair16_o1_dual_noskip  pair16_d128_o1_h32_h232_dual_noskip
 #   synn_token_128x2_32_32_pair16_o1_dual_nosqr  pair16_d128_o1_h32_h232_dual_nosqr
+#   synn_token_128x2_32_32_pair8_o1        pair8_d128_o1_h32_h232 (the pair table half as wide)
+#   synn_token_128x2_32_32_pair16_o1_hm    pair16_d128_o1_h32_h232_hm (the file says FoldedTokens: each frame is read
+#                                          mirrored when its own king is on files 6 to 9)
 #   synn_token_128x2_32_32_pair16_m8_f2    pair16_d128_o3_h32_h232_m8_f2
 #
 # Manaka writes these with `manaka-train export-nnue` from a net trained under
@@ -134,6 +158,8 @@ synn_token_128x2_32_32_pair16_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_dual = ["sym_token", "sym_dual"]
 synn_token_128x2_32_32_pair16_o1_dual_noskip = ["sym_token", "sym_dual"]
 synn_token_128x2_32_32_pair16_o1_dual_nosqr = ["sym_token", "sym_dual"]
+synn_token_128x2_32_32_pair8_o1 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
 synn_token_128x2_32_32_pair16_m8_f2 = ["sym_token"]
 # The two hand-crafted evaluations (HCE), spelled the same way: how many
 # coefficients, then how they are grouped. Material is 10 board slots and 7
@@ -165,6 +191,10 @@ required-features = ["sym"]
 [[example]]
 name = "nnue_dump"
 required-features = ["nnue_standard"]
+
+[[example]]
+name = "clip_dump"
+required-features = ["clip_stats"]
 
 [dev-dependencies]
 proptest = "~1.11"

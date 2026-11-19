@@ -17,9 +17,11 @@ use std::arch::x86_64::{
 };
 
 use crate::simd::scalar_post_ft;
+use crate::types::HIDDEN_SIZE;
+#[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
 use crate::types::{
     FC_0_INPUT_DIMS, FC_0_OUTPUT_DIMS, FC_0_PADDED_INPUT_DIMS, FC_1_OUTPUT_DIMS,
-    FC_1_PADDED_INPUT_DIMS, FC_2_OUTPUT_DIMS, FC_2_PADDED_INPUT_DIMS, HIDDEN_SIZE, HIDDEN1_DIMS,
+    FC_1_PADDED_INPUT_DIMS, FC_2_OUTPUT_DIMS, FC_2_PADDED_INPUT_DIMS, HIDDEN1_DIMS,
 };
 
 const VNNI_LANES: usize = 64;
@@ -86,10 +88,15 @@ pub unsafe fn sqr_clipped_relu(input: &[i32], output: &mut [u8]) {
 /// The whole `fc_0 → ReLU/SqrReLU → fc_1 → ReLU → fc_2 → shortcut` chain in one
 /// `target_feature` body.
 ///
+/// The 1536 shape's alone: fc_2 reads fc_1's 32 outputs as one 32-byte input
+/// here, and the 64-wide shapes have 64 of them. Theirs is
+/// [`super::avx512_packed_tail`].
+///
 /// # Safety
 /// The running CPU must support `avx512f`, `avx512bw`, and `avx512vnni`. The
 /// bias/weight slices must have the SFNN-1536 layer-stack shapes (checked by the
 /// `debug_assert`s below).
+#[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 pub unsafe fn fused_fc_chain(
     transformed: &[u8; FC_0_INPUT_DIMS],
@@ -299,6 +306,7 @@ unsafe fn affine_padded32_avx512_vnni(
 mod tests {
     use super::*;
     use crate::aligned::Aligned64;
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     use crate::types::{
         FC_1_INPUT_DIMS, FC_2_INPUT_DIMS, LAYER_STACKS, NetDims, NetHeader, NetworkStack,
         NnueNetwork, NnueNetworkBuilder,
@@ -306,6 +314,7 @@ mod tests {
 
     /// A single-stack network whose lone stack the caller fills through `fill`.
     /// Returned by value, so that its arena outlives the borrowed stack.
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     fn stack_net(fill: impl FnOnce(&mut NnueNetworkBuilder)) -> NnueNetwork {
         let dims = NetDims {
             layer_stacks: 1,
@@ -411,6 +420,7 @@ mod tests {
         assert_eq!(avx, sca);
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     fn affine_padded32_parity(out_dims: usize, in_dims: usize, seed: u32) {
         let weights: Aligned64<i8> = seeded_weights(out_dims * 32, seed)
             .iter()
@@ -445,6 +455,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     #[test]
     fn affine_padded32_matches_scalar_for_fc_1_and_fc_2_shapes() {
         require_vnni!();
@@ -572,6 +583,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     fn seeded_net(seed: u32) -> NnueNetwork {
         stack_net(|b| {
             for (i, s) in b.fc_0_biases_mut(0).iter_mut().enumerate() {
@@ -604,6 +616,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     fn per_layer_reference_score(transformed: &[u8; FC_0_INPUT_DIMS], stack: &NetworkStack) -> i32 {
         let mut fc_0_out = [0i32; FC_0_OUTPUT_DIMS];
         scalar_post_ft::affine(
@@ -647,6 +660,7 @@ mod tests {
         fc_2_out[0].wrapping_add(fc_0_out[HIDDEN1_DIMS])
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     #[test]
     #[cfg_attr(miri, ignore)]
     fn fused_fc_chain_matches_per_layer_flow_for_all_buckets() {
@@ -682,6 +696,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sfnn_halfkahm2_1536_15_32_k3k3")]
     #[test]
     fn fused_fc_chain_preserves_shortcut() {
         require_vnni!();

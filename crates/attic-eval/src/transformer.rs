@@ -17,6 +17,20 @@
 //! White's; the side-to-move reordering happens only in the output transform,
 //! as it does in the reference.
 //!
+//! ## The threat shape
+//!
+//! Under `sfnn_halfkahm2_threat_1024_15_64_8gp` each half also carries the sum of the rows of
+//! the position's active threat features ([`crate::threat`]), and the accumulator keeps the
+//! list of rows each half was built from. Those rows depend on *every* piece's attacks, so a
+//! quiet move can change dozens of them and no per-piece delta says which. The update is
+//! therefore: enumerate the child's list from scratch, compare it with the parent's, and
+//! apply the difference. The child's list is never made by patching the parent's, because
+//! the cap at 128 edges makes a list depend on the order of the whole enumeration. A half
+//! whose own king moved is rebuilt, threat rows included, as the HalfKA part always is.
+//!
+//! `threat_force_refresh` turns every update into a rebuild; a search must come out the same
+//! either way, which is the end-to-end check of the diff.
+//!
 //! ## Output transform
 //!
 //! The transform folds each perspective's [`HIDDEN_SIZE`] values to half as
@@ -35,6 +49,8 @@ use crate::finny::FinnyCache;
 #[cfg(feature = "sfnn")]
 use crate::simd::post_ft_kernel;
 use crate::simd::transformer_kernel;
+#[cfg(feature = "sfnn_threat")]
+use crate::threat::{MAX_LIST, ThreatDiff, ThreatList, build_lists};
 use crate::types::{FC_0_INPUT_DIMS, HIDDEN_SIZE, NnueNetwork};
 
 /// Width of the byte buffer the output transform fills: one lane per fc_0
@@ -47,6 +63,11 @@ pub const FT_OUTPUT_DIMS: usize = FC_0_INPUT_DIMS;
 pub struct Accumulator {
     /// Indexed by [`Color::index`]; see the module head on the layout.
     perspectives: [Aligned64<i16>; Color::COUNT],
+    /// The threat rows each half's sum was built from, so that the next position's list
+    /// can be compared with it. Meaningful only once the accumulator has been filled by a
+    /// refresh or a derive.
+    #[cfg(feature = "sfnn_threat")]
+    threats: [ThreatList; Color::COUNT],
 }
 
 impl Accumulator {
@@ -57,7 +78,15 @@ impl Accumulator {
                 Aligned64::<i16>::zeroed(HIDDEN_SIZE),
                 Aligned64::<i16>::zeroed(HIDDEN_SIZE),
             ],
+            #[cfg(feature = "sfnn_threat")]
+            threats: [ThreatList::EMPTY; Color::COUNT],
         }
+    }
+
+    /// The threat rows `color`'s half was built from.
+    #[cfg(feature = "sfnn_threat")]
+    pub fn threat_list(&self, color: Color) -> &ThreatList {
+        &self.threats[color.index()]
     }
 
     /// Read-only view of one perspective's accumulator half.
@@ -74,6 +103,8 @@ impl Accumulator {
     /// # Panics
     /// Panics if `pos` is missing either king (via [`active_features`]).
     pub fn refresh(&mut self, net: &NnueNetwork, pos: &Position) {
+        #[cfg(feature = "sfnn_threat")]
+        let lists = build_lists(pos);
         for color in [Color::Black, Color::White] {
             let feats = active_features(pos, color);
             refresh_perspective(
@@ -82,6 +113,12 @@ impl Accumulator {
                 &net.ft_weights,
                 &feats,
             );
+            #[cfg(feature = "sfnn_threat")]
+            {
+                let i = color.index();
+                self.threats[i] = lists[i];
+                add_threat_list(&mut self.perspectives[i], net, &lists[i]);
+            }
         }
     }
 
@@ -122,6 +159,8 @@ impl Accumulator {
 
         let undo = pos.do_move(mv);
 
+        #[cfg(feature = "sfnn_threat")]
+        let lists = build_lists(pos);
         let mut next = Accumulator::new();
         for color in [Color::Black, Color::White] {
             let i = color.index();
@@ -132,11 +171,26 @@ impl Accumulator {
                     &net.ft_weights,
                     &active_features(pos, color),
                 );
+                #[cfg(feature = "sfnn_threat")]
+                {
+                    next.threats[i] = lists[i];
+                    add_threat_list(&mut next.perspectives[i], net, &lists[i]);
+                }
             } else {
                 let after = active_features(pos, color);
                 let (removed, added) = changed_indices(&before[i], &after);
                 next.perspectives[i].copy_from_slice(&self.perspectives[i]);
                 apply_diff(&mut next.perspectives[i], &net.ft_weights, &added, &removed);
+                #[cfg(feature = "sfnn_threat")]
+                {
+                    next.threats[i] = lists[i];
+                    apply_threat_change(
+                        &mut next.perspectives[i],
+                        net,
+                        &self.threats[i],
+                        &lists[i],
+                    );
+                }
             }
         }
 
@@ -162,23 +216,42 @@ impl Accumulator {
         post_pos: &Position,
         delta: &MoveDelta,
     ) {
+        #[cfg(feature = "sfnn_threat")]
+        let lists = build_lists(post_pos);
         for color in [Color::Black, Color::White] {
             let i = color.index();
             match delta.half(color) {
-                Some(pd) => transformer_kernel::derive_features(
-                    &mut dst.perspectives[i],
-                    &src.perspectives[i],
-                    &net.ft_weights,
-                    pd.added(),
-                    pd.removed(),
-                ),
-                None => {
+                Some(pd) if !FORCE_REFRESH => {
+                    transformer_kernel::derive_features(
+                        &mut dst.perspectives[i],
+                        &src.perspectives[i],
+                        &net.ft_weights,
+                        pd.added(),
+                        pd.removed(),
+                    );
+                    #[cfg(feature = "sfnn_threat")]
+                    {
+                        dst.threats[i] = lists[i];
+                        apply_threat_change(
+                            &mut dst.perspectives[i],
+                            net,
+                            &src.threats[i],
+                            &lists[i],
+                        );
+                    }
+                }
+                _ => {
                     refresh_perspective(
                         &mut dst.perspectives[i],
                         &net.ft_biases,
                         &net.ft_weights,
                         &active_features(post_pos, color),
                     );
+                    #[cfg(feature = "sfnn_threat")]
+                    {
+                        dst.threats[i] = lists[i];
+                        add_threat_list(&mut dst.perspectives[i], net, &lists[i]);
+                    }
                 }
             }
         }
@@ -206,30 +279,69 @@ impl Accumulator {
         delta: &MoveDelta,
         cache: &mut FinnyCache,
     ) {
+        // A forced-refresh build leaves the finny table out as well: it is the build that
+        // has nothing incremental in it, to be compared with one that has.
+        if FORCE_REFRESH {
+            Self::derive_into(src, dst, net, post_pos, delta);
+            return;
+        }
+        #[cfg(feature = "sfnn_threat")]
+        let lists = build_lists(post_pos);
         for color in [Color::Black, Color::White] {
             let i = color.index();
             match delta.half(color) {
-                Some(pd) => transformer_kernel::derive_features(
-                    &mut dst.perspectives[i],
-                    &src.perspectives[i],
-                    &net.ft_weights,
-                    pd.added(),
-                    pd.removed(),
-                ),
-                None => cache.refresh_into(net, post_pos, color, &mut dst.perspectives[i]),
+                Some(pd) => {
+                    transformer_kernel::derive_features(
+                        &mut dst.perspectives[i],
+                        &src.perspectives[i],
+                        &net.ft_weights,
+                        pd.added(),
+                        pd.removed(),
+                    );
+                    #[cfg(feature = "sfnn_threat")]
+                    {
+                        dst.threats[i] = lists[i];
+                        apply_threat_change(
+                            &mut dst.perspectives[i],
+                            net,
+                            &src.threats[i],
+                            &lists[i],
+                        );
+                    }
+                }
+                None => {
+                    // The cached half is bias plus HalfKA rows; the threat rows go on top.
+                    cache.refresh_into(net, post_pos, color, &mut dst.perspectives[i]);
+                    #[cfg(feature = "sfnn_threat")]
+                    {
+                        dst.threats[i] = lists[i];
+                        add_threat_list(&mut dst.perspectives[i], net, &lists[i]);
+                    }
+                }
             }
         }
     }
 
     /// Pack the accumulator into `out`, the byte input buffer for L1, as the
     /// module head describes.
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     pub fn output_transform(&self, stm: Color, out: &mut [u8; FT_OUTPUT_DIMS]) {
         const HALF: usize = HIDDEN_SIZE / 2;
         let stm_half = &self.perspectives[stm.index()];
         let other_half = &self.perspectives[stm.flip().index()];
         post_ft_kernel::ewm_one_perspective(stm_half, &mut out[..HALF]);
         post_ft_kernel::ewm_one_perspective(other_half, &mut out[HALF..]);
+    }
+
+    /// The threat shape's output transform: the same layout, on an accumulator at the scale
+    /// the file holds, so each lane is clamped to `[0, 127]` and the product shifted by 7.
+    #[cfg(feature = "sfnn_threat")]
+    pub fn output_transform(&self, stm: Color, out: &mut [u8; FT_OUTPUT_DIMS]) {
+        const HALF: usize = HIDDEN_SIZE / 2;
+        let stm_half = &self.perspectives[stm.index()];
+        let other_half = &self.perspectives[stm.flip().index()];
+        post_ft_kernel::ewm_one_perspective_file_scale(stm_half, &mut out[..HALF]);
+        post_ft_kernel::ewm_one_perspective_file_scale(other_half, &mut out[HALF..]);
     }
 
     /// The standard shapes' output transform: clip each accumulator to a byte
@@ -258,6 +370,28 @@ impl Default for Accumulator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether every update is a rebuild (the `threat_force_refresh` checking build).
+const FORCE_REFRESH: bool = cfg!(all(
+    feature = "sfnn_threat",
+    feature = "threat_force_refresh"
+));
+
+/// Put every row of `list` on `out`: the refresh of the threat part of a half.
+#[cfg(feature = "sfnn_threat")]
+fn add_threat_list(out: &mut [i16], net: &NnueNetwork, list: &ThreatList) {
+    let mut rows = [0u32; MAX_LIST];
+    let n = list.rows_into(&mut rows);
+    transformer_kernel::apply_threat_rows(out, &net.threat_weights, &[], &rows[..n]);
+}
+
+/// Turn the threat part of `out`, built from `old`, into the one `new` calls for.
+#[cfg(feature = "sfnn_threat")]
+fn apply_threat_change(out: &mut [i16], net: &NnueNetwork, old: &ThreatList, new: &ThreatList) {
+    let mut diff = ThreatDiff::new();
+    diff.between(old, new);
+    transformer_kernel::apply_threat_rows(out, &net.threat_weights, diff.removed(), diff.added());
 }
 
 /// Rebuild one perspective's half: copy the biases, then add each active
@@ -313,9 +447,9 @@ mod tests {
 
     // Mirrored from the scalar kernel, so that these tests can transcribe the
     // reference formula independently.
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     const EWM_CLAMP: i32 = 127 * 2;
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     const EWM_SHIFT: i32 = 9;
 
     #[test]
@@ -1037,7 +1171,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     #[test]
     fn output_transform_lays_out_stm_then_other() {
         let mut acc = Accumulator::new();
@@ -1059,7 +1193,7 @@ mod tests {
         assert_eq!(out_w[HALF], 39);
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     #[test]
     fn output_transform_clamps_min_zero_and_max() {
         let mut acc = Accumulator::new();
@@ -1084,7 +1218,7 @@ mod tests {
         assert_eq!(out[4], 9, "mid-range pair");
     }
 
-    #[cfg(feature = "sfnn")]
+    #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
     #[test]
     fn output_transform_full_row_matches_scalar_formula() {
         // Cross-checked against a direct transcription of the reference formula.
@@ -1108,6 +1242,84 @@ mod tests {
                     let s1 = (half[j + HALF] as i32).clamp(0, EWM_CLAMP);
                     let expected = ((s0 * s1) >> EWM_SHIFT) as u8;
                     assert_eq!(out[p * HALF + j], expected, "stm {stm:?} half {p} lane {j}");
+                }
+            }
+        }
+    }
+
+    /// The threat shape's transform, laid out like the others but at the file's scale:
+    /// `(clamp(a, 0, 127) * clamp(b, 0, 127)) >> 7`.
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn threat_output_transform_lays_out_stm_then_other() {
+        let mut acc = Accumulator::new();
+        acc.perspectives[Color::Black.index()][0] = 100;
+        acc.perspectives[Color::Black.index()][HALF] = 50;
+        acc.perspectives[Color::White.index()][0] = 125;
+        acc.perspectives[Color::White.index()][HALF] = 25;
+
+        let mut out = [0u8; FT_OUTPUT_DIMS];
+        acc.output_transform(Color::Black, &mut out);
+        assert_eq!(out[0], 39); // 100 * 50 >> 7
+        assert_eq!(out[HALF], 24); // 125 * 25 >> 7
+        assert!(out[1..HALF].iter().all(|&x| x == 0));
+        assert!(out[HALF + 1..].iter().all(|&x| x == 0));
+
+        let mut out_w = [0u8; FT_OUTPUT_DIMS];
+        acc.output_transform(Color::White, &mut out_w);
+        assert_eq!(out_w[0], 24);
+        assert_eq!(out_w[HALF], 39);
+    }
+
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn threat_output_transform_clamps_at_127_not_254() {
+        let mut acc = Accumulator::new();
+        let black = &mut acc.perspectives[Color::Black.index()];
+        black[0] = -1_000;
+        black[HALF] = 100;
+        black[1] = 127;
+        black[HALF + 1] = 0;
+        black[2] = 30_000;
+        black[HALF + 2] = 30_000;
+        black[3] = 127;
+        black[HALF + 3] = 127;
+        black[4] = 200; // above 127: clamps to 127, unlike the doubled shapes' 254
+        black[HALF + 4] = 64;
+
+        let mut out = [0u8; FT_OUTPUT_DIMS];
+        acc.output_transform(Color::Black, &mut out);
+        assert_eq!(out[0], 0, "negative clamps to zero");
+        assert_eq!(out[1], 0, "zero factor yields zero");
+        assert_eq!(out[2], 126, "saturated pair");
+        assert_eq!(out[3], 126, "exact ceiling pair");
+        assert_eq!(out[4], 63, "127 * 64 >> 7");
+    }
+
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn threat_output_transform_full_row_matches_the_formula() {
+        let mut acc = Accumulator::new();
+        for color in [Color::Black, Color::White] {
+            let half = &mut acc.perspectives[color.index()];
+            for i in 0..HIDDEN_SIZE {
+                half[i] = ((i as i32 * 5 + color.index() as i32 * 3) % 400 - 50) as i16;
+            }
+        }
+        for stm in [Color::Black, Color::White] {
+            let mut out = [0u8; FT_OUTPUT_DIMS];
+            acc.output_transform(stm, &mut out);
+            let order = [stm, stm.flip()];
+            for (p, persp) in order.iter().enumerate() {
+                let half = acc.perspective(*persp);
+                for j in 0..HALF {
+                    let a = (half[j] as i32).clamp(0, 127);
+                    let b = (half[j + HALF] as i32).clamp(0, 127);
+                    assert_eq!(
+                        out[p * HALF + j] as i32,
+                        (a * b) >> 7,
+                        "stm {stm:?} half {p} lane {j}"
+                    );
                 }
             }
         }

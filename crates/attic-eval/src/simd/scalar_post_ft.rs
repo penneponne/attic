@@ -167,6 +167,22 @@ pub fn ewm_one_perspective(half: &[i16], out: &mut [u8]) {
     }
 }
 
+/// [`ewm_one_perspective`] for an accumulator at the scale the file holds (the threat
+/// shape, whose feature transformer is not doubled): each lane is clamped to `[0, 127]`,
+/// the pair multiplied, and the product shifted right by 7. Same result as the doubled form
+/// on twice the values; the clamp and the shift are what change.
+#[cfg(feature = "sfnn_threat")]
+pub fn ewm_one_perspective_file_scale(half: &[i16], out: &mut [u8]) {
+    const HALF: usize = HIDDEN_SIZE / 2;
+    debug_assert_eq!(half.len(), HIDDEN_SIZE);
+    debug_assert_eq!(out.len(), HALF);
+    for j in 0..HALF {
+        let s0 = (half[j] as i32).clamp(0, 127);
+        let s1 = (half[j + HALF] as i32).clamp(0, 127);
+        out[j] = ((s0 * s1) >> 7) as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +296,29 @@ mod tests {
             "not a multiple of 32"
         );
         assert!(!pair_sums_fit_i16(&[0i8; 10], 1, 32, 32), "wrong length");
+    }
+
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn ewm_file_scale_clamps_at_127_and_shifts_by_7() {
+        const HALF: usize = HIDDEN_SIZE / 2;
+        let mut half = [0i16; HIDDEN_SIZE];
+        half[0] = 100;
+        half[HALF] = 50; // 5000 >> 7 = 39
+        half[1] = -1_000;
+        half[HALF + 1] = 100;
+        half[2] = 30_000;
+        half[HALF + 2] = 30_000; // 127 * 127 >> 7 = 126
+        half[3] = 127;
+        half[HALF + 3] = 128; // 128 clamps to 127
+        half[4] = 1;
+        half[HALF + 4] = 127; // 127 >> 7 = 0
+        half[5] = 2;
+        half[HALF + 5] = 127; // 254 >> 7 = 1
+        let mut out = [0u8; HALF];
+        ewm_one_perspective_file_scale(&half, &mut out);
+        assert_eq!(&out[..6], &[39, 0, 126, 126, 0, 1]);
+        assert!(out[6..].iter().all(|&x| x == 0));
     }
 
     #[test]
