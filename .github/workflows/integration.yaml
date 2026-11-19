@@ -174,6 +174,8 @@ jobs:
             synn_token_128x2_32_32_pair16_o1_hm \
             synn_token_128x2_32_32_pair16_o1_r4 \
             synn_token_128x2_32_32_pair16_o1_r2 \
+            synn_token_128x2_32_32_pair16_o1_hc \
+            synn_token_128x2_32_32_pair16_o1_r4hc \
             synn_kp_128x2_32_32 \
             synn_kp_256x2_32_32 \
             synn_token_256x2_32_32 \
@@ -185,6 +187,8 @@ jobs:
           done
       - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_r4
       - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_r2
+      - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_hc
+      - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_r4hc
 
   # The `clip_stats` feature is a measuring build: a counter in the head of a SYNN net, and the
   # `clipstats` command that reads it. It is off in every build above, so nothing there compiles

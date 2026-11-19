@@ -29,6 +29,9 @@ struct Dims {
     /// How far apart two board tokens may be for their pair to have a row that is
     /// read: [`MAX_PAIR_RADIUS`] reads every pair. See [`PAIR_RADIUS`].
     radius: usize,
+    /// Whether a token in hand keeps no pair with a board piece that is not a king.
+    /// See [`HAND_CUT`].
+    hand_cut: bool,
 }
 
 impl Dims {
@@ -43,6 +46,7 @@ impl Dims {
             moment: 0,
             field: 0,
             radius: MAX_PAIR_RADIUS,
+            hand_cut: false,
         }
     }
 
@@ -60,6 +64,13 @@ impl Dims {
 
     const fn radius(self, radius: usize) -> Dims {
         Dims { radius, ..self }
+    }
+
+    const fn hand_cut(self) -> Dims {
+        Dims {
+            hand_cut: true,
+            ..self
+        }
     }
 }
 
@@ -92,6 +103,10 @@ const DIMS: Dims = if cfg!(any(
     Dims::new(256, 3, 32, 32)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16") {
     Dims::new(128, 3, 32, 32).pair(16)
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_hc") {
+    Dims::new(128, 1, 32, 32).pair(16).hand_cut()
+} else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r4hc") {
+    Dims::new(128, 1, 32, 32).pair(16).radius(4).hand_cut()
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r4") {
     Dims::new(128, 1, 32, 32).pair(16).radius(4)
 } else if cfg!(feature = "synn_token_128x2_32_32_pair16_o1_r2") {
@@ -162,9 +177,15 @@ pub const PAIR: usize = DIMS.pair;
 /// at; the shape does.
 pub const PAIR_RADIUS: usize = DIMS.radius;
 
+/// Whether a token in hand keeps no pair with a board piece that is not a king: the
+/// trainer's `--pair-hand-cut`. The held piece is still a token with a row of the
+/// embedding; what is gone is its pairs with the board. Its pairs with a king and
+/// with another held piece are kept. Like the radius, the net does not say.
+pub const HAND_CUT: bool = DIMS.hand_cut;
+
 /// Whether the shape cuts its pair table: a constant, so that a shape that does
 /// not has none of the filter in its build.
-pub const PAIR_CUT: bool = PAIR_RADIUS < MAX_PAIR_RADIUS;
+pub const PAIR_CUT: bool = PAIR_RADIUS < MAX_PAIR_RADIUS || HAND_CUT;
 
 /// Channels of the second moment's embedding, or 0 when the shape has none.
 pub const MOMENT: usize = DIMS.moment;
@@ -250,6 +271,8 @@ const _: () = {
         "synn_token_128x2_32_32_pair16_o1_hm",
         "synn_token_128x2_32_32_pair8_o1",
         "synn_token_128x2_32_32_pair16_o1_r4",
+        "synn_token_128x2_32_32_pair16_o1_hc",
+        "synn_token_128x2_32_32_pair16_o1_r4hc",
         "synn_token_128x2_32_32_pair16_o1_r2",
         "synn_token_128x2_32_32_pair16_m8_f2",
     );
@@ -284,7 +307,7 @@ const _: () = {
     // a distance between two squares of the board.
     assert!(
         PAIR_RADIUS <= MAX_PAIR_RADIUS && (!PAIR_CUT || HAS_PAIR),
-        "a pair radius needs a pair table and is at most the board's width less one"
+        "a pair cut needs a pair table, and a radius is at most the board's width less one"
     );
     // The moment and the field want a row per token, as the embedding does, and
     // the other spaces have up to 125,389 of them: a field of eight channels per

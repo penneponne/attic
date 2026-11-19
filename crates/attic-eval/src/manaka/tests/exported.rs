@@ -62,12 +62,14 @@ pub(super) const EXPORTED: Exported = Exported {
 /// From the file `export-nnue` wrote at tideborn's develop 91421804 for a net
 /// trained at this shape (QS 1000M, 2026-11-11); the string depends on the shape
 /// alone. At order one `Newton[1]` is the identity, and the exporter writes it all
-/// the same. A pair table cut at a radius (`_r4`, `_r2`) is this shape with zero
-/// rows in it, and its string is this one: the radius is in no file.
+/// the same. A pair table cut at a radius or by the hand cut (`_r4`, `_r2`, `_hc`,
+/// `_r4hc`) is this shape with zero rows in it, and its string is this one: the radius is in no file.
 #[cfg(any(
     feature = "synn_token_128x2_32_32_pair16_o1",
     feature = "synn_token_128x2_32_32_pair16_o1_r4",
-    feature = "synn_token_128x2_32_32_pair16_o1_r2"
+    feature = "synn_token_128x2_32_32_pair16_o1_r2",
+    feature = "synn_token_128x2_32_32_pair16_o1_hc",
+    feature = "synn_token_128x2_32_32_pair16_o1_r4hc"
 ))]
 pub(super) const EXPORTED: Exported = Exported {
     rest: "Tokens[128x2],Network=Dense[1<-32](ClippedReLU[32](Dense[32<-32](ClippedReLU[32](Dense[32<-288](ClipScaled[128](Newton[1](PowerSum[1](InputSlice[128(0:128)]))),ClipScaled[16](PairSum[16](InputSlice[16(128:144)]))))))",

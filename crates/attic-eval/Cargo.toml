@@ -139,6 +139,8 @@ hce = []
 #                                          mirrored when its own king is on files 6 to 9)
 #   synn_token_128x2_32_32_pair16_o1_r4    pair16_d128_o1_h32_h232, trained --pair-radius 4
 #   synn_token_128x2_32_32_pair16_o1_r2    pair16_d128_o1_h32_h232, trained --pair-radius 2
+#   synn_token_128x2_32_32_pair16_o1_hc    pair16_d128_o1_h32_h232, trained --pair-hand-cut
+#   synn_token_128x2_32_32_pair16_o1_r4hc  pair16_d128_o1_h32_h232, trained --pair-hand-cut --pair-radius 4
 #   synn_token_128x2_32_32_pair16_m8_f2    pair16_d128_o3_h32_h232_m8_f2
 #
 # Manaka writes these with `manaka-train export-nnue` from a net trained under
@@ -154,6 +156,8 @@ synn_token_128x2_32_32_pair8_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
 synn_token_128x2_32_32_pair16_o1_r4 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_r2 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_hc = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_r4hc = ["sym_token"]
 synn_token_128x2_32_32_pair16_m8_f2 = ["sym_token"]
 # The two hand-crafted evaluations (HCE), spelled the same way: how many
 # coefficients, then how they are grouped. Material is 10 board slots and 7
