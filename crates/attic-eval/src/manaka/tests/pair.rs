@@ -321,3 +321,175 @@ fn the_byte_totals_are_the_plain_ones_to_the_last_bit() {
         }
     }
 }
+
+/// The cut written out from the definition, with squares as `attic_state` has them
+/// and the tokens as `tokens.rs` hands them out, and none of this module's cells:
+/// a pair touching a hand or a king is read, two other pieces are when both their
+/// files and their ranks are within the radius.
+///
+/// Every board token is built from a piece and a square, so the check is over the
+/// real numbering and not a reading of it.
+const ALL_KINDS: [attic_state::PieceKind; 8] = {
+    use attic_state::PieceKind::*;
+    [Pawn, Lance, Knight, Silver, Gold, Bishop, Rook, King]
+};
+
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    Square(i32, i32),
+    King,
+    Hand,
+}
+
+fn tokens_with_squares(frame: attic_state::Color) -> Vec<(u32, Place)> {
+    use crate::tokens::{HAND_KINDS, board_row, hand_row};
+    use attic_state::{Color, Piece, PieceKind, Square};
+
+    let mut out = Vec::new();
+    for color in [Color::Black, Color::White] {
+        for kind in ALL_KINDS {
+            for promoted in [false, true] {
+                let piece = match promoted {
+                    false => Some(Piece::new(kind, color)),
+                    true => Piece::promoted(kind, color),
+                };
+                let Some(piece) = piece else { continue };
+                for sq in 0..Square::COUNT as u8 {
+                    let sq = Square::from_index(sq).expect("a square");
+                    // A king is read against everything, so it has no square here.
+                    let place = match kind {
+                        PieceKind::King => Place::King,
+                        _ => Place::Square(i32::from(sq.file()), i32::from(sq.rank())),
+                    };
+                    out.push((board_row(piece, sq, frame), place));
+                }
+            }
+        }
+    }
+    for owner in [Color::Black, Color::White] {
+        for kind in HAND_KINDS {
+            let most = match kind {
+                PieceKind::Pawn => 18,
+                PieceKind::Lance | PieceKind::Knight | PieceKind::Silver | PieceKind::Gold => 4,
+                _ => 2,
+            };
+            for copy in 0..most {
+                out.push((hand_row(owner, kind, copy, frame), Place::Hand));
+            }
+        }
+    }
+    assert_eq!(out.len(), TOKENS, "every token, once");
+    out
+}
+
+/// The engine's cut is the definition's over every pair of tokens, in both frames,
+/// and the frames agree on it, which is what lets one answer from the black frame's
+/// tokens stand for the white frame's row of the same pair.
+#[test]
+fn the_cut_is_the_definition_over_every_pair() {
+    use super::super::pair::pair_kept;
+    use super::super::{HAND_CUT, PAIR_RADIUS};
+    use crate::tokens::other_frame;
+    use attic_state::Color;
+
+    for frame in [Color::Black, Color::White] {
+        let tokens = tokens_with_squares(frame);
+        let mut kept = 0usize;
+        for (i, &(a, place_a)) in tokens.iter().enumerate() {
+            for &(b, place_b) in &tokens[i + 1..] {
+                let want = match (place_a, place_b) {
+                    (Place::Square(fa, ra), Place::Square(fb, rb)) => {
+                        (fa - fb).unsigned_abs() as usize <= PAIR_RADIUS
+                            && (ra - rb).unsigned_abs() as usize <= PAIR_RADIUS
+                    }
+                    // A held piece against a board piece that is not a king.
+                    (Place::Hand, Place::Square(..)) | (Place::Square(..), Place::Hand) => {
+                        !HAND_CUT
+                    }
+                    _ => true,
+                };
+                assert_eq!(
+                    pair_kept(a, b),
+                    want,
+                    "{frame:?}: ({a}, {b}) at radius {PAIR_RADIUS}"
+                );
+                assert_eq!(pair_kept(b, a), want, "{frame:?}: ({b}, {a})");
+                assert_eq!(
+                    pair_kept(other_frame(a), other_frame(b)),
+                    want,
+                    "the other frame's ({a}, {b}) at radius {PAIR_RADIUS}"
+                );
+                kept += usize::from(want);
+            }
+        }
+        // The trainer pins these counts over the same triangle; a cut that read a
+        // different set of pairs from the one it was trained on would show here.
+        match (PAIR_RADIUS, HAND_CUT) {
+            (2, false) => assert_eq!(kept, 1_042_476),
+            (4, false) => assert_eq!(kept, 1_786_076),
+            (8, false) => assert_eq!(kept, 2_745_996),
+            (8, true) => assert_eq!(kept, 2_585_940),
+            (4, true) => assert_eq!(kept, 1_626_020),
+            _ => {}
+        }
+    }
+}
+
+/// What `touch_pairs` adds is the rows of the pairs the cut keeps, taken in the
+/// order the others are given and added up the way every other shape's are: so it
+/// is the plain totals of the kept others, to the last bit, for every count of
+/// others from none to thirty-nine.
+#[test]
+fn touching_a_token_reads_only_the_rows_the_cut_keeps() {
+    use super::super::PAIR;
+    use super::super::accumulator::PairSum;
+    use super::super::pair::{pair_kept, row_totals_scalar, touch_pairs};
+    use super::fixtures::synthetic;
+    use crate::tokens::FeatureIndex;
+
+    if !HAS_PAIR {
+        return;
+    }
+    let net = synthetic();
+    let mut state = 11u64;
+    let mut pick = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) as usize % TOKENS) as FeatureIndex
+    };
+    for count in 0..40 {
+        let token = pick();
+        let mut others = Vec::new();
+        while others.len() < count {
+            let other = pick();
+            if other != token && !others.contains(&other) {
+                others.push(other);
+            }
+        }
+        let kept: Vec<FeatureIndex> = others
+            .iter()
+            .copied()
+            .filter(|&other| !super::super::PAIR_CUT || pair_kept(token, other))
+            .collect();
+        let totals = row_totals_scalar(net.pair.halves(), token, &kept);
+        for sign in [1.0, -1.0] {
+            let mut sums = [vec![0.0; PAIR], vec![0.0; PAIR]];
+            touch_pairs(&mut sums, net, token, &others, sign);
+            for (frame, sum) in sums.iter().enumerate() {
+                for (channel, &got) in sum.iter().enumerate() {
+                    // The sums start at zero and the touch adds to them, so a minus zero
+                    // total comes out as the zero it was added to.
+                    let want = 0.0 + sign * PairSum::from(totals[frame * PAIR + channel]);
+                    // The AVX2 path and the scalar one add in the same order and
+                    // agree to the bit, so the sums do.
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{count} others, sign {sign}, frame {frame}, channel {channel}"
+                    );
+                }
+            }
+        }
+    }
+}

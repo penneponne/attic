@@ -5,12 +5,14 @@
 //! The numbering itself is `tokens.rs`'s; this reads it and does not extend it,
 //! so that the one file that knows how a token is numbered stays the only one.
 
-use crate::tokens::FeatureIndex;
+use attic_state::PieceKind;
+
+use crate::tokens::{BOARD_ROWS, FeatureIndex, MAX_ACTIVE_FEATURES, SQUARES};
 
 use super::accumulator::PairSum;
 use super::pair_i8::{cube_totals, scaled_totals};
 use super::pair_table::{Cells, ROW};
-use super::{PAIR, PAIR_ROWS, SymNetwork, TOKENS};
+use super::{HAND_CUT, PAIR, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, SymNetwork, TOKENS};
 
 /// The row of the pair `{a, b}` in the pair table.
 ///
@@ -29,6 +31,114 @@ pub(super) fn pair_row(a: FeatureIndex, b: FeatureIndex) -> usize {
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
     let (lo, hi) = (lo as usize, hi as usize);
     lo * (2 * TOKENS - lo - 1) / 2 + (hi - lo - 1)
+}
+
+/// The column of the cut table for a king, either side's: its pairs are read wherever
+/// the other token is. A real square is 0 to 80.
+const KING: u8 = 126;
+
+/// The column of the cut table for a token in hand, which stands on no square. Its
+/// pairs with a king and with another token in hand are read; its pairs with a board
+/// piece are read unless the shape cuts them ([`HAND_CUT`]).
+const HAND: u8 = 127;
+
+/// The row of the cut table that keeps every column: a touched king.
+const ROW_KING: usize = SQUARES;
+
+/// The row of a touched token in hand.
+const ROW_HAND: usize = SQUARES + 1;
+
+/// Columns of the cut table: a power of two, so that a `u8` masked by `COLUMNS − 1`
+/// indexes it without a bounds check, and past the 81 squares, [`KING`] and [`HAND`].
+const COLUMNS: usize = 128;
+
+/// Every token's square for the cut, by its row: the square a board piece stands on
+/// as `tokens.rs` numbers it, [`KING`] for a king and [`HAND`] for a token in hand.
+///
+/// A board row is `(kind · 2 + theirs) · SQUARES + square`, and the king's kind is
+/// the king's `PieceKind`, as `tokens.rs` keeps every kind that is not promoted at
+/// its own number.
+static SQUARE_OF: [u8; TOKENS] = {
+    let mut squares = [HAND; TOKENS];
+    let mut token = 0;
+    while token < BOARD_ROWS {
+        squares[token] = if token / SQUARES / 2 == PieceKind::King.index() {
+            KING
+        } else {
+            (token % SQUARES) as u8
+        };
+        token += 1;
+    }
+    squares
+};
+
+/// `NEAR[row][column]` is 1 when a token on square `row` (or the king's row, or the
+/// hand's) keeps its pair with a token on square `column` (or the king's, or the
+/// hand's): the trainer's `pair_kept_with`, which this has to be.
+///
+/// - a king keeps every pair;
+/// - a token in hand keeps its pairs with a king and with another token in hand, and
+///   with a board piece unless [`HAND_CUT`];
+/// - two board pieces keep their pair when both their squares are within
+///   [`PAIR_RADIUS`] of each other on both axes.
+///
+/// A table and not arithmetic, because this is asked of every other token for every
+/// token a move touches, thirty-nine times over: two loads and no branch is what the
+/// answer costs, where the file and rank differences are twenty instructions. 83 by
+/// 128 bytes, which the cache holds beside the pair rows it saves reading.
+///
+/// The files and ranks come out of a square by dividing and taking the remainder by
+/// nine (`(9 − file) · 9 + (rank − 1)` in Manaka's numbering); which way each runs
+/// does not matter for a distance.
+static NEAR: [[u8; COLUMNS]; SQUARES + 2] = {
+    let mut table = [[0u8; COLUMNS]; SQUARES + 2];
+    let mut row = 0;
+    while row < SQUARES + 2 {
+        let mut column = 0;
+        while column < COLUMNS {
+            let column_is_hand = column == HAND as usize;
+            let column_is_king = column == KING as usize;
+            let kept = if row == ROW_KING || column_is_king {
+                true
+            } else if row == ROW_HAND {
+                // Against a king is above; against another hand, or a board piece.
+                column_is_hand || !HAND_CUT
+            } else if column_is_hand {
+                !HAND_CUT
+            } else if column < SQUARES {
+                let files = (row / 9).abs_diff(column / 9);
+                let ranks = (row % 9).abs_diff(column % 9);
+                (if files > ranks { files } else { ranks }) <= PAIR_RADIUS
+            } else {
+                false
+            };
+            table[row][column] = kept as u8;
+            column += 1;
+        }
+        row += 1;
+    }
+    table
+};
+
+/// The row of [`NEAR`] a touched token reads: its square, or the king's or the hand's.
+#[inline]
+fn near_row(token: FeatureIndex) -> &'static [u8; COLUMNS] {
+    let square = SQUARE_OF[token as usize];
+    &NEAR[match square {
+        KING => ROW_KING,
+        HAND => ROW_HAND,
+        square => square as usize,
+    }]
+}
+
+/// Whether the pair `{a, b}` has a row that is read, by the rule [`NEAR`] gives.
+/// Symmetric. The two frames agree on it, since turning the board half way keeps
+/// every distance and swaps ours and theirs without moving a king into another
+/// kind, so the one answer from the black frame's tokens serves the white frame's
+/// row of the same pair.
+#[cfg(all(test, feature = "sym_token"))]
+pub(super) fn pair_kept(a: FeatureIndex, b: FeatureIndex) -> bool {
+    near_row(a)[(SQUARE_OF[b as usize] & (COLUMNS as u8 - 1)) as usize] != 0
 }
 
 /// The most tokens a position holds, which is the most `others` a touch has to read
@@ -182,7 +292,24 @@ pub(super) fn touch_pairs(
     if PAIR == 0 {
         return;
     }
-    let totals = row_totals(net.pair.cells(), token, others);
+    let totals = if PAIR_CUT {
+        // Only the rows the cut keeps are read. The others are zeros in a net
+        // trained at this radius, so skipping them adds nothing and saves a
+        // cache line each: the test is a few instructions, the row a trip to
+        // memory. Written to a fixed array and counted rather than pushed, so
+        // there is no branch for the predictor to miss on.
+        let near = near_row(token);
+        let mut kept = [0 as FeatureIndex; MAX_ACTIVE_FEATURES];
+        let mut count = 0;
+        for &other in others {
+            kept[count] = other;
+            count +=
+                usize::from(near[usize::from(SQUARE_OF[other as usize] & (COLUMNS as u8 - 1))]);
+        }
+        row_totals(net.pair.cells(), token, &kept[..count])
+    } else {
+        row_totals(net.pair.cells(), token, others)
+    };
     for (frame, sum) in sums.iter_mut().enumerate() {
         add_frame(sum, &totals, frame, sign);
     }

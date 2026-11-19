@@ -144,6 +144,10 @@ hce = []
 #   synn_token_128x2_32_32_pair8_o1        pair8_d128_o1_h32_h232 (the pair table half as wide)
 #   synn_token_128x2_32_32_pair16_o1_hm    pair16_d128_o1_h32_h232_hm (the file says FoldedTokens: each frame is read
 #                                          mirrored when its own king is on files 6 to 9)
+#   synn_token_128x2_32_32_pair16_o1_r4    pair16_d128_o1_h32_h232, trained --pair-radius 4
+#   synn_token_128x2_32_32_pair16_o1_r2    pair16_d128_o1_h32_h232, trained --pair-radius 2
+#   synn_token_128x2_32_32_pair16_o1_hc    pair16_d128_o1_h32_h232, trained --pair-hand-cut
+#   synn_token_128x2_32_32_pair16_o1_r4hc  pair16_d128_o1_h32_h232, trained --pair-hand-cut --pair-radius 4
 #   synn_token_32x2_32_32_pair32_o1_dual   pair32_d32_o1_h32_h232_dual
 #   synn_token_64x2_32_32_pair16_o1_dual   pair16_d64_o1_h32_h232_dual
 #   synn_token_32x2_32_32_pair24_o1_dual   pair24_d32_o1_h32_h232_dual
@@ -163,6 +167,10 @@ synn_token_128x2_32_32_pair16_o1_dual_noskip = ["sym_token", "sym_dual"]
 synn_token_128x2_32_32_pair16_o1_dual_nosqr = ["sym_token", "sym_dual"]
 synn_token_128x2_32_32_pair8_o1 = ["sym_token"]
 synn_token_128x2_32_32_pair16_o1_hm = ["sym_token", "sym_hm"]
+synn_token_128x2_32_32_pair16_o1_r4 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_r2 = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_hc = ["sym_token"]
+synn_token_128x2_32_32_pair16_o1_r4hc = ["sym_token"]
 synn_token_32x2_32_32_pair32_o1_dual = ["sym_token", "sym_dual"]
 synn_token_64x2_32_32_pair16_o1_dual = ["sym_token", "sym_dual"]
 synn_token_32x2_32_32_pair24_o1_dual = ["sym_token", "sym_dual"]
