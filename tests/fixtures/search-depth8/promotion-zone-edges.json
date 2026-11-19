@@ -3,6 +3,6 @@
   "depth": 8,
   "bestmove": "5d6c+",
   "score": { "mate": 1 },
-  "nodes": 382,
+  "nodes": 402,
   "pv": ["5d6c+"]
 }

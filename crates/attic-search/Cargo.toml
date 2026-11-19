@@ -24,6 +24,7 @@ sfnn_halfkahm2_1536_15_32_k3k3 = ["attic-eval/sfnn_halfkahm2_1536_15_32_k3k3", "
 sfnn_halfkahm2_1024_15_64_progress8kpabs = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8kpabs", "sfnn_progress"]
 sfnn_halfkahm2_1024_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8ek", "sfnn_progress"]
 sfnn_halfkahm2_2304_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_2304_15_64_progress8ek", "sfnn_progress"]
+sfnn_halfkahm2_threat_1024_15_64_8gp = ["attic-eval/sfnn_halfkahm2_threat_1024_15_64_8gp", "sfnn_threat"]
 nnue_kp_256x2_32_32 = ["attic-eval/nnue_kp_256x2_32_32"]
 nnue_kp_128x2_32_32 = ["attic-eval/nnue_kp_128x2_32_32"]
 nnue_halfkp_256x2_32_32 = ["attic-eval/nnue_halfkp_256x2_32_32"]
@@ -36,6 +37,8 @@ synn_token_256x2_32_32 = ["attic-eval/synn_token_256x2_32_32", "sym"]
 synn_halfkp_128x2_32_32 = ["attic-eval/synn_halfkp_128x2_32_32", "sym"]
 synn_token_128x2_32_32_pair16 = ["attic-eval/synn_token_128x2_32_32_pair16", "sym"]
 synn_token_128x2_32_32_pair16_o1 = ["attic-eval/synn_token_128x2_32_32_pair16_o1", "sym"]
+synn_token_128x2_32_32_pair8_o1 = ["attic-eval/synn_token_128x2_32_32_pair8_o1", "sym"]
+synn_token_128x2_32_32_pair16_o1_hm = ["attic-eval/synn_token_128x2_32_32_pair16_o1_hm", "sym"]
 synn_token_128x2_32_32_pair16_o1_r4 = ["attic-eval/synn_token_128x2_32_32_pair16_o1_r4", "sym"]
 synn_token_128x2_32_32_pair16_o1_r2 = ["attic-eval/synn_token_128x2_32_32_pair16_o1_r2", "sym"]
 synn_token_128x2_32_32_pair16_o1_hc = ["attic-eval/synn_token_128x2_32_32_pair16_o1_hc", "sym"]
@@ -51,18 +54,27 @@ hce_fit_qsearched = ["attic-eval/hce_fit_qsearched"]
 # selects a network; a shape turns on the ones that describe it.
 #   sfnn            every SFNN shape: HalfKA_hm2, a shortcut row in fc_0
 #   sfnn_progress   ... whose stack comes from a `progress.bin` beside `nn.bin`
+#   sfnn_threat     ... that adds the threat features and picks its stack by an integer
+#                   game-phase sum (Sirius); no `progress.bin`
 #   sym             every Manaka shape: a network, but one the tests cannot build
 #                   synthetically, because it exists only as a trained file
 #   hce             every hand-crafted shape: no network, so nothing for the
 #                   tests that build a synthetic one to build
 sfnn = []
 sfnn_progress = ["sfnn"]
+sfnn_threat = ["sfnn"]
 sym = []
 hce = []
 # Make `go nodes N` stop where the reference does: leave the `check_time` poll out
 # of `qsearch` and start each `go` with `callsCnt` at 0. For comparing against
 # YaneuraOu only; the default keeps the earlier abort latency.
 ref_check_time = []
+# A measuring build: count how often each layer of a SYNN head is on its floor or ceiling,
+# and answer the `clipstats` command with it. Pass-through to `attic-eval`.
+clip_stats = ["attic-eval/clip_stats"]
+# A checking build for the threat shape: every `do_move` rebuilds the accumulator from scratch.
+# Pass-through to `attic-eval`; see there.
+threat_force_refresh = ["attic-eval/threat_force_refresh"]
 
 [dev-dependencies]
 serde = { version = "~1.0", features = ["derive"] }

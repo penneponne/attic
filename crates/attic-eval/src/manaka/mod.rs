@@ -88,6 +88,8 @@
 mod accumulator;
 mod body;
 mod cache;
+#[cfg(feature = "clip_stats")]
+pub mod clip_stats;
 mod dense;
 #[cfg(feature = "sym_token")]
 mod field;
@@ -118,8 +120,8 @@ pub use qdense::QuantW1;
 pub use qdense_i8::QuantW1I8;
 pub use shape::{
     BLOCK_LEN, DIM, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAND_CUT, HAS_FIELD, HAS_MOMENT,
-    HAS_PAIR, HEAD, HIDDEN, HIDDEN2, MAX_PAIR_RADIUS, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER, PAIR,
-    PAIR_AT, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, POWER_LEN, TOKENS,
+    HAS_PAIR, HEAD, HIDDEN, HIDDEN2, HM, MAX_PAIR_RADIUS, MOMENT, MOMENT_AT, MOMENT_LEN, ORDER,
+    PAIR, PAIR_AT, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, POWER_LEN, TOKENS,
 };
 
 /// A loaded network, with the tables this shape actually reads.

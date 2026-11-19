@@ -31,6 +31,9 @@
 //! hold; that is the quantisation whose error is quoted above, so the number
 //! already includes it. A row of 800 ordinary weights gets fewer still.
 
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+use super::dense::{finish_eight, totals_of_eight};
+
 /// What 1.0 is in the quantised input. Chosen on trained NNUE weights: 4096 had the
 /// smallest error. Below it the input rounding dominates (1024 was four times
 /// worse); above it the weights have to give up levels so that the row still fits
@@ -115,11 +118,11 @@ impl QuantW1 {
     /// clip: the bound in [`row_levels`] is for that range. This is the head's first
     /// layer, `HIDDEN` rows over `FEATURE_LEN` columns.
     pub fn layer_clip(&self, input: &[f32], bias: &[f32], out: &mut [f32]) {
-        // The one buffer a layer needs, on the stack and exactly as wide as the
-        // layer: a `Vec` would be an allocation per node, and a buffer sized for the
-        // widest shape would be cleared in full on every call.
-        let mut x = [0i16; INPUT_STRIDE];
-        self.layer_clip_with(input, bias, out, &mut x);
+        // The one buffer a layer needs, exactly as wide as the layer and kept from
+        // one call to the next: a `Vec` would be an allocation per node, and a fresh
+        // array a clear per node. `quantize_input` writes every entry, the padding
+        // included, so what the last call left is never read.
+        INPUT.with_borrow_mut(|x| self.layer_clip_with(input, bias, out, x));
     }
 
     /// [`QuantW1::layer_clip`] with the buffer for the quantised input supplied, which
@@ -135,10 +138,13 @@ impl QuantW1 {
         let row = |at: usize| &self.w[at * self.stride..(at + 1) * self.stride];
         let mut at = 0;
         while at + ROWS <= self.rows {
-            let sums = dots::<ROWS>(std::array::from_fn(|r| row(at + r)), x);
-            for (r, sum) in sums.into_iter().enumerate() {
-                out[at + r] = (bias[at + r] + sum as f32 * self.scale[at + r]).clamp(0.0, 1.0);
-            }
+            block(
+                std::array::from_fn(|r| row(at + r)),
+                x,
+                &self.scale[at..at + ROWS],
+                &bias[at..at + ROWS],
+                &mut out[at..at + ROWS],
+            );
             at += ROWS;
         }
         while at < self.rows {
@@ -181,6 +187,12 @@ impl QuantW1 {
 /// takes and what a row of [`QuantW1`] is stored as. The layer is always the head's
 /// `HIDDEN` rows over `FEATURE_LEN` columns.
 const INPUT_STRIDE: usize = super::FEATURE_LEN.next_multiple_of(LANES);
+
+thread_local! {
+    /// [`QuantW1::layer_clip`]'s quantised input, one buffer a thread.
+    static INPUT: std::cell::RefCell<[i16; INPUT_STRIDE]> =
+        const { std::cell::RefCell::new([0; INPUT_STRIDE]) };
+}
 
 /// The input as `round(x · INPUT_LEVELS)`, with the padding zeroed.
 ///
@@ -248,6 +260,105 @@ unsafe fn quantize_input_avx2(x: &[f32], out: &mut [i16]) {
     for slot in &mut out[x.len()..] {
         *slot = 0;
     }
+}
+
+/// [`ROWS`] rows of the layer: each row's `i32` total, then the finish the layer
+/// gives every row, `clamp(bias + total · scale, 0, 1)`, into `out`.
+///
+/// On AVX2 the eight totals are brought together and finished as one register of
+/// eight, where a row at a time spends a store and eight additions on each; the
+/// totals wrap and so add in any order, and the finish is the same operations and
+/// the same clip, so the bits are the row's.
+#[inline]
+fn block(rows: [&[i16]; ROWS], x: &[i16], scale: &[f32], bias: &[f32], out: &mut [f32]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        unsafe { block_avx2(rows, x, scale, bias, out) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        let sums = dots::<ROWS>(rows, x);
+        for (r, sum) in sums.into_iter().enumerate() {
+            out[r] = (bias[r] + sum as f32 * scale[r]).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// One step of the dot product: sixteen products of `weights` and `input` added into
+/// `acc`'s eight `i32` lanes. `vpdpwssd` where the build has AVX-VNNI, `vpmaddwd` and
+/// `vpaddd` where it does not.
+///
+/// # Safety
+/// AVX2 (and AVX-VNNI where the build enables it) must be available.
+#[cfg(all(target_arch = "x86_64", target_feature = "avxvnni"))]
+#[inline]
+#[target_feature(enable = "avx2,avxvnni")]
+fn multiply_add(
+    acc: std::arch::x86_64::__m256i,
+    weights: std::arch::x86_64::__m256i,
+    input: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    std::arch::x86_64::_mm256_dpwssd_avx_epi32(acc, weights, input)
+}
+
+/// [`multiply_add`] without AVX-VNNI.
+///
+/// # Safety
+/// AVX2 must be available.
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    not(target_feature = "avxvnni")
+))]
+#[inline]
+#[target_feature(enable = "avx2")]
+fn multiply_add(
+    acc: std::arch::x86_64::__m256i,
+    weights: std::arch::x86_64::__m256i,
+    input: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    _mm256_add_epi32(acc, _mm256_madd_epi16(weights, input))
+}
+
+/// [`block`] on AVX2.
+///
+/// # Safety
+/// The running CPU must support AVX2 (and AVX-VNNI if the build enables it). The
+/// `cfg` that compiles this in names them, and the build is for the host CPU.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg_attr(target_feature = "avxvnni", target_feature(enable = "avx2,avxvnni"))]
+#[cfg_attr(not(target_feature = "avxvnni"), target_feature(enable = "avx2"))]
+unsafe fn block_avx2(
+    rows: [&[i16]; ROWS],
+    x: &[i16],
+    scale: &[f32],
+    bias: &[f32],
+    out: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+
+    let n = x.len();
+    assert_eq!(n % LANES, 0, "a padded row is whole vectors");
+    for row in rows {
+        assert_eq!(row.len(), n, "a row is as long as the input");
+    }
+    let mut acc = [_mm256_setzero_si256(); ROWS];
+    for at in (0..n).step_by(LANES) {
+        // SAFETY: `at + 16 <= n`, and the input and every row are `n` long
+        // (asserted above); the loads are unaligned.
+        unsafe {
+            let input = _mm256_loadu_si256(x.as_ptr().add(at).cast::<__m256i>());
+            for r in 0..ROWS {
+                let weights = _mm256_loadu_si256(rows[r].as_ptr().add(at).cast::<__m256i>());
+                acc[r] = multiply_add(acc[r], weights, input);
+            }
+        }
+    }
+    // SAFETY: AVX2 is enabled on this function; `scale`, `bias` and `out` are eight
+    // `f32` long (checked by `finish_eight`).
+    unsafe { finish_eight(totals_of_eight(acc), scale, bias, out) };
 }
 
 /// `Σ w[i] · x[i]` for `R` rows against one input, in `i32` arithmetic that wraps.
@@ -560,6 +671,46 @@ mod tests {
             println!("{rows}x{cols}: worst |error| {worst:.2e}");
             // The scale is what turns a total into the layer's sum.
             assert!(q.scale(0) > 0.0);
+        }
+    }
+
+    /// The layer is its rows' scalar sums finished one at a time, to the last bit:
+    /// the block of eight is only a way of doing the same sums together.
+    #[test]
+    fn the_layer_is_the_scalar_rows_to_the_last_bit() {
+        for (rows, cols) in [
+            (32usize, 288usize),
+            (32, 768),
+            (32, 800),
+            (16, 64),
+            (8, 16),
+            (13, 33),
+            (5, 33),
+            (1, 1),
+        ] {
+            for seed in 0..4u64 {
+                let w: Vec<f32> = stream(rows * cols, 11 + seed)
+                    .iter()
+                    .map(|v| v * 0.3)
+                    .collect();
+                // A bias that puts rows below zero, inside the range and above one.
+                let bias: Vec<f32> = stream(rows, 21 + seed).iter().map(|v| v * 1.5).collect();
+                let x = clipped(cols, 31 + seed);
+                let q = QuantW1::new(&w, rows, cols);
+                let mut got = vec![0.0f32; rows];
+                q.layer_clip_any_width(&x, &bias, &mut got);
+                let mut input = vec![0i16; q.stride()];
+                quantize_input_scalar(&x, &mut input);
+                for row in 0..rows {
+                    let sum = dots_scalar([q.weights(row)], &input)[0];
+                    let want = (bias[row] + sum as f32 * q.scale(row)).clamp(0.0, 1.0);
+                    assert_eq!(
+                        got[row].to_bits(),
+                        want.to_bits(),
+                        "{rows}x{cols} seed {seed} row {row}"
+                    );
+                }
+            }
         }
     }
 

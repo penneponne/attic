@@ -15,7 +15,7 @@ fn drive(input: &str) -> String {
 fn full_usi_to_usiok_golden() {
     let out = drive("usi\nquit\n");
     let expected = "\
-id name Attic 9.80git\n\
+id name Attic 9.96git\n\
 id author Kei Ishida <ishida.kei@gmail.com>\n\
 option name USI_Hash type spin default 1024 min 1 max 33554432\n\
 option name Threads type spin default 4 min 1 max 1024\n\
@@ -57,6 +57,14 @@ option name NumaPolicy type string default auto\n\
 option name USI_Ponder type check default false\n\
 option name Stochastic_Ponder type check default false\n\
 usiok\n";
+    // The scale's default is the evaluator's: 16, or Sirius's 26 under the threat shape.
+    let expected = expected.replace(
+        "option name FV_SCALE type spin default 16 ",
+        &format!(
+            "option name FV_SCALE type spin default {} ",
+            attic_search::FV_SCALE_DEFAULT
+        ),
+    );
     assert_eq!(out, expected);
 }
 
@@ -117,7 +125,7 @@ fn oversized_line_emits_command_too_long() {
 #[cfg_attr(miri, ignore)]
 fn full_handshake_then_setoption_then_quit() {
     let out = drive("usi\nsetoption name USI_Hash value 256\nisready\nquit\n");
-    assert!(out.starts_with("id name Attic 9.80git\n"));
+    assert!(out.starts_with("id name Attic 9.96git\n"));
     assert!(out.contains("usiok\n"));
     assert!(!out.contains("rejected"));
     // The default `EvalDir` has no `nn.bin` for a network shape; a hand-crafted

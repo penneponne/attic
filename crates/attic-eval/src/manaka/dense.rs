@@ -104,6 +104,197 @@ unsafe fn dots_avx2<const R: usize>(rows: [&[f32]; R], input: &[f32]) -> [f32; R
     out
 }
 
+/// The eight rows' accumulators, each lane-by-lane total taken in the order
+/// [`dots_scalar`] takes it: from zero, lane 0 first, lane 7 last.
+///
+/// A row's eight lanes are added one after another, and the sum of eight rows done
+/// that way is a chain of eight adds behind a store and eight loads for each, where
+/// the same eight chains side by side are eight adds in all, once the eight
+/// registers are turned so that a register holds one lane of every row. Each lane
+/// of the answer is the addition it was for its row, in its order, from the same
+/// zero, so the bits are the row's own.
+///
+/// # Safety
+/// The running CPU must support AVX2.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+#[target_feature(enable = "avx2")]
+fn lane_totals(acc: [std::arch::x86_64::__m256; ROWS]) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+
+    // Eight rows by eight lanes, turned in three steps. First pairs of rows are
+    // interleaved: `a0` holds, in each half of the register, lanes 0 and 1 of rows 0
+    // and 1 (lanes 4 and 5 in its high half), `a1` lanes 2 and 3 (6 and 7), and so on
+    // for rows 2 and 3, 4 and 5, 6 and 7.
+    let (a0, a1) = (
+        _mm256_unpacklo_ps(acc[0], acc[1]),
+        _mm256_unpackhi_ps(acc[0], acc[1]),
+    );
+    let (a2, a3) = (
+        _mm256_unpacklo_ps(acc[2], acc[3]),
+        _mm256_unpackhi_ps(acc[2], acc[3]),
+    );
+    let (a4, a5) = (
+        _mm256_unpacklo_ps(acc[4], acc[5]),
+        _mm256_unpackhi_ps(acc[4], acc[5]),
+    );
+    let (a6, a7) = (
+        _mm256_unpacklo_ps(acc[6], acc[7]),
+        _mm256_unpackhi_ps(acc[6], acc[7]),
+    );
+    // Four rows of one lane in each half of a register.
+    let b0 = _mm256_shuffle_ps::<0x44>(a0, a2);
+    let b1 = _mm256_shuffle_ps::<0xEE>(a0, a2);
+    let b2 = _mm256_shuffle_ps::<0x44>(a1, a3);
+    let b3 = _mm256_shuffle_ps::<0xEE>(a1, a3);
+    let b4 = _mm256_shuffle_ps::<0x44>(a4, a6);
+    let b5 = _mm256_shuffle_ps::<0xEE>(a4, a6);
+    let b6 = _mm256_shuffle_ps::<0x44>(a5, a7);
+    let b7 = _mm256_shuffle_ps::<0xEE>(a5, a7);
+    // Eight rows of one lane: lane `l` of rows 0..4 is in the low half of `b_l`
+    // (`l < 4`) and lane `l + 4` in its high half.
+    let lane = [
+        _mm256_permute2f128_ps::<0x20>(b0, b4),
+        _mm256_permute2f128_ps::<0x20>(b1, b5),
+        _mm256_permute2f128_ps::<0x20>(b2, b6),
+        _mm256_permute2f128_ps::<0x20>(b3, b7),
+        _mm256_permute2f128_ps::<0x31>(b0, b4),
+        _mm256_permute2f128_ps::<0x31>(b1, b5),
+        _mm256_permute2f128_ps::<0x31>(b2, b6),
+        _mm256_permute2f128_ps::<0x31>(b3, b7),
+    ];
+    let mut total = _mm256_setzero_ps();
+    for l in lane {
+        total = _mm256_add_ps(total, l);
+    }
+    total
+}
+
+/// The totals of eight `i32` registers, one per row, as one register: lane `r` is
+/// the total of `acc[r]`'s eight lanes. Integer addition is associative, so the
+/// order does not matter, and a tree of horizontal adds (three levels, over all
+/// eight at once) is the cheapest.
+///
+/// # Safety
+/// AVX2 must be available.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+#[target_feature(enable = "avx2")]
+pub(super) fn totals_of_eight(
+    acc: [std::arch::x86_64::__m256i; ROWS],
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+
+    // After the first level a register holds, in each half, pairs of two rows'
+    // lanes; after the second, one row's four-lane total per lane, the low half
+    // of the register for the lanes 0 to 3 of the rows and the high half for 4 to 7.
+    let first = [
+        _mm256_hadd_epi32(acc[0], acc[1]),
+        _mm256_hadd_epi32(acc[2], acc[3]),
+        _mm256_hadd_epi32(acc[4], acc[5]),
+        _mm256_hadd_epi32(acc[6], acc[7]),
+    ];
+    let low = _mm256_hadd_epi32(first[0], first[1]);
+    let high = _mm256_hadd_epi32(first[2], first[3]);
+    // Rows 0 to 3 are `low`'s halves added, rows 4 to 7 `high`'s.
+    _mm256_add_epi32(
+        _mm256_permute2x128_si256::<0x20>(low, high),
+        _mm256_permute2x128_si256::<0x31>(low, high),
+    )
+}
+
+/// The finish every integer layer gives a row, for eight rows at once:
+/// `clamp(bias + sum · scale, 0, 1)`, with `sum` the row's `i32` total.
+///
+/// The same operations in the same order as the row at a time, `sum as f32`, a
+/// multiplication, an addition and the clip, with nothing fused: the clip is
+/// `f32::clamp`'s, below zero is zero, above one is one, and anything else is left
+/// as it is, which a compare and a blend do.
+///
+/// # Safety
+/// The running CPU must support AVX2. `scale`, `bias` and `out` must be eight
+/// `f32` long.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn finish_eight(
+    sums: std::arch::x86_64::__m256i,
+    scale: &[f32],
+    bias: &[f32],
+    out: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+
+    assert_eq!(scale.len(), ROWS);
+    assert_eq!(bias.len(), ROWS);
+    assert_eq!(out.len(), ROWS);
+    // SAFETY: `scale`, `bias` and `out` are eight `f32` long (asserted above); the
+    // accesses are unaligned.
+    unsafe {
+        let value = _mm256_add_ps(
+            _mm256_loadu_ps(bias.as_ptr()),
+            _mm256_mul_ps(_mm256_cvtepi32_ps(sums), _mm256_loadu_ps(scale.as_ptr())),
+        );
+        let zero = _mm256_setzero_ps();
+        let one = _mm256_set1_ps(1.0);
+        let at_least_zero = _mm256_blendv_ps(value, zero, _mm256_cmp_ps::<_CMP_LT_OQ>(value, zero));
+        let at_most_one = _mm256_blendv_ps(
+            at_least_zero,
+            one,
+            _mm256_cmp_ps::<_CMP_GT_OQ>(at_least_zero, one),
+        );
+        _mm256_storeu_ps(out.as_mut_ptr(), at_most_one);
+    }
+}
+
+/// [`dots_avx2`] for eight rows at once and a length of whole registers, with the
+/// lanes of every row added up together by [`lane_totals`]. There is no tail to add
+/// after them, which is why the length has to be a multiple of eight.
+///
+/// # Safety
+/// The running CPU must support AVX2. The `cfg` that compiles this in names it,
+/// and the build is for the host CPU, so it does.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[allow(dead_code)]
+#[target_feature(enable = "avx2")]
+unsafe fn dots_block_avx2(rows: [&[f32]; ROWS], input: &[f32]) -> [f32; ROWS] {
+    use std::arch::x86_64::*;
+
+    let n = input.len();
+    assert_eq!(n % LANES, 0, "no tail: whole registers only");
+    for row in rows {
+        assert_eq!(row.len(), n, "a row is as long as the input");
+    }
+    let mut acc = [_mm256_setzero_ps(); ROWS];
+    for at in (0..n).step_by(LANES) {
+        // SAFETY: `at + LANES <= n`, and the input and every row are `n` long
+        // (asserted above). The loads are unaligned.
+        unsafe {
+            let x = _mm256_loadu_ps(input.as_ptr().add(at));
+            for r in 0..ROWS {
+                let w = _mm256_loadu_ps(rows[r].as_ptr().add(at));
+                acc[r] = _mm256_add_ps(acc[r], _mm256_mul_ps(w, x));
+            }
+        }
+    }
+    let mut out = [0.0f32; ROWS];
+    // SAFETY: `out` is eight `f32`, which is what one register stores.
+    unsafe { _mm256_storeu_ps(out.as_mut_ptr(), lane_totals(acc)) };
+    out
+}
+
+/// [`dots`] for a block of [`ROWS`] rows: the same sums, with the lanes of the eight
+/// added up together where the length allows it.
+#[inline]
+fn dots_block(rows: [&[f32]; ROWS], input: &[f32]) -> [f32; ROWS] {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    if input.len().is_multiple_of(LANES) {
+        // SAFETY: the `cfg` above is the build enabling AVX2 for the CPU it runs on.
+        return unsafe { dots_block_avx2(rows, input) };
+    }
+    dots::<ROWS>(rows, input)
+}
+
 /// Whichever of the two this build compiled for.
 #[inline]
 fn dots<const R: usize>(rows: [&[f32]; R], input: &[f32]) -> [f32; R] {
@@ -133,7 +324,7 @@ pub(super) fn dense_clip(weights: &[f32], bias: &[f32], input: &[f32], out: &mut
     let row = |at: usize| &weights[at * n..(at + 1) * n];
     let mut at = 0;
     while at + ROWS <= out.len() {
-        let sums = dots::<ROWS>(std::array::from_fn(|r| row(at + r)), input);
+        let sums = dots_block(std::array::from_fn(|r| row(at + r)), input);
         for (r, sum) in sums.into_iter().enumerate() {
             out[at + r] = (bias[at + r] + sum).clamp(0.0, 1.0);
         }
@@ -181,6 +372,43 @@ mod tests {
             let got = unsafe { dots_avx2(rows, &input) };
             for r in 0..4 {
                 assert_eq!(got[r].to_bits(), want[r].to_bits(), "n={n} row {r}");
+            }
+        }
+    }
+
+    /// The eight rows' lanes added together are each row's own sum to the last bit,
+    /// at every length of whole registers, with signed zeros and large and small
+    /// values in the rows.
+    #[test]
+    fn the_block_of_eight_is_the_scalar_one_to_the_last_bit() {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        for n in [0usize, 8, 16, 32, 288, 800, 1192] {
+            for seed in 0..6u64 {
+                let mut input = values(n, 10 + seed);
+                let mut data = values(8 * n, 20 + seed);
+                // Exact and negative zeros, which a regrouped sum or a different
+                // start would show.
+                for (i, v) in data.iter_mut().enumerate() {
+                    match (i + seed as usize) % 11 {
+                        0 => *v = 0.0,
+                        1 => *v = -0.0,
+                        _ => {}
+                    }
+                }
+                for (i, v) in input.iter_mut().enumerate() {
+                    if (i + seed as usize).is_multiple_of(13) {
+                        *v = 0.0;
+                    }
+                }
+                let rows: [&[f32]; 8] = std::array::from_fn(|r| &data[r * n..(r + 1) * n]);
+                let want = dots_scalar(rows, &input);
+                // SAFETY: the `cfg` is the build enabling AVX2.
+                let got = unsafe { dots_block_avx2(rows, &input) };
+                let dispatched = dots_block(rows, &input);
+                for r in 0..8 {
+                    assert_eq!(got[r].to_bits(), want[r].to_bits(), "n={n} row {r}");
+                    assert_eq!(dispatched[r].to_bits(), want[r].to_bits(), "n={n} row {r}");
+                }
             }
         }
     }
