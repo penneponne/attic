@@ -8,7 +8,7 @@ use attic_state::{Move, Position};
 
 use super::super::{
     DIM, FEATURE_LEN, FIELD, FIELD_LEN, FirstLayer, HEAD, HIDDEN, HIDDEN2, MOMENT, MOMENT_LEN,
-    ORDER, PAIR, PAIR_ROWS, PairTable, SymNetwork, TOKENS,
+    ORDER, PAIR, PAIR_CUT, PAIR_RADIUS, PAIR_ROWS, PairTable, SymNetwork, TOKENS,
 };
 
 /// The synthetic pair table from values drawn in `f32`: rounded to halves the way
@@ -77,15 +77,29 @@ pub(super) fn synthetic() -> &'static SymNetwork {
 struct Gain;
 
 impl Gain {
-    /// A pair table half as wide leaves the first layer with a sixth fewer inputs and less spread from
-    /// the table it keeps, so its rows want more weight to reach the upper rail.
-    const W1: f32 = if super::super::PAIR == 8 { 0.6 } else { 0.3 };
+    /// Pair8 and the radius shapes have less spread, so they need more gain.
+    /// A cut pair block carries less, and the first hidden layer's upper rail is the
+    /// one that stops being reached at a radius of two, so those shapes weigh the
+    /// first layer a little more.
+    const W1: f32 = if PAIR == 8 {
+        0.6
+    } else if PAIR_CUT {
+        0.5
+    } else {
+        0.3
+    };
     /// The second layer reads at most `HIDDEN` activations in `[0, 1]`, where the
     /// first reads hundreds, so it wants more weight to reach a rail.
     const W2: f32 = 2.0;
-    /// Eight channels sum fewer rows' worth of spread than sixteen do, so a table that narrow wants a
-    /// larger gain to reach the upper rail on the opening's thirty plies.
-    const PAIR: f32 = if super::super::PAIR == 8 { 0.2 } else { 0.1 };
+    /// The pair sum is over 780 pairs, and a table cut at a radius sums fewer (about
+    /// 390 at two, 500 at four, of the middle game's 780), so its spread is less and
+    /// the gain has to be larger for the block to reach a rail.
+    const PAIR: f32 = match PAIR_RADIUS {
+        0..=2 => 0.16,
+        3..=4 => 0.12,
+        _ if PAIR == 8 => 0.2,
+        _ => 0.1,
+    };
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
 

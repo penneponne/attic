@@ -4,8 +4,8 @@ use attic_state::Position;
 
 use super::super::shape::SQUARES;
 use super::super::{
-    DIM, FEATURE_LEN, FIELD, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR, SymNetwork,
-    TOKENS,
+    DIM, FEATURE_LEN, FIELD, HAS_FIELD, HAS_MOMENT, HAS_PAIR, MOMENT, ORDER, PAIR, PAIR_RADIUS,
+    SymNetwork, TOKENS,
 };
 use super::encode::column_of;
 #[cfg(feature = "sym_hm")]
@@ -19,6 +19,27 @@ use super::fixtures::{tokens_present, upto};
 fn counted_pair_row(a: u32, b: u32) -> usize {
     let (lo, hi) = (a.min(b) as usize, a.max(b) as usize);
     (0..lo).map(|i| TOKENS - 1 - i).sum::<usize>() + (hi - lo - 1)
+}
+
+/// Whether the pair `{a, b}` has a row at all in a table cut at the shape's radius,
+/// written out from the definition and not from the engine's tables.
+///
+/// A token is a board piece (`id < 2268`, `id = (kind · 2 + theirs) · 81 + square`,
+/// kings are kind 7) or a held one. A pair that touches a held piece or a king is
+/// kept; two other pieces are when their squares, `file = square / 9` and
+/// `rank = square % 9`, are within the radius of each other on both axes.
+fn kept(a: u32, b: u32) -> bool {
+    let board = |token: u32| token < 14 * 2 * 81;
+    if !board(a) || !board(b) {
+        return true;
+    }
+    let king = |token: u32| token / 81 / 2 == 7;
+    if king(a) || king(b) {
+        return true;
+    }
+    let (a, b) = (a % 81, b % 81);
+    let near = |x: u32, y: u32| (x as i32 - y as i32).unsigned_abs() as usize <= PAIR_RADIUS;
+    near(a / 9, b / 9) && near(a % 9, b % 9)
 }
 
 /// The forward pass written a second way, in `f64`, from the definition.
@@ -88,6 +109,9 @@ pub(super) fn reference_value_with(net: &SymNetwork, pos: &Position, fold: bool)
             let mut sum = [0.0f64; PAIR];
             for (i, &a) in tokens.iter().enumerate() {
                 for &b in &tokens[i + 1..] {
+                    if !kept(a, b) {
+                        continue;
+                    }
                     let row = counted_pair_row(a, b);
                     for (channel, s) in sum.iter_mut().enumerate() {
                         *s += f64::from(net.pair.value(row, channel));

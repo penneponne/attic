@@ -188,17 +188,21 @@ impl Accumulator {
         #[cfg(feature = "sym_token")]
         {
             let black = std::mem::take(&mut self.active[Color::Black.index()]);
-            let folded = self.folded;
-            for at in 0..black.len() {
-                touch_pairs_hm(
-                    &mut self.pair,
-                    net,
-                    black[at],
-                    &black[..at],
-                    1.0,
-                    folded,
-                    [true, true],
-                );
+            for (at, &token) in black.iter().enumerate() {
+                let others = &black[..at];
+                if HM {
+                    touch_pairs_hm(
+                        &mut self.pair,
+                        net,
+                        token,
+                        others,
+                        1.0,
+                        self.folded,
+                        [true, true],
+                    );
+                } else {
+                    touch_pairs(&mut self.pair, net, token, others, 1.0);
+                }
             }
             self.active[Color::Black.index()] = black;
         }
