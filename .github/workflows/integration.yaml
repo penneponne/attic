@@ -155,9 +155,9 @@ jobs:
           cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu \
             ${{ matrix.args }} -- -D warnings
 
-  # These SYNN and NNUE shapes have no dedicated matrix row above. A
-  # workspace-wide Clippy pass per shape catches compilation errors and lints
-  # that depend on shape constants. Dependencies build once.
+  # A workspace-wide clippy pass covers the remaining SYNN shapes and NNUE KP
+  # at 128, including lints that depend on shape constants. The radius shapes
+  # also run evaluator tests to check that the cut keeps the intended pairs.
   synn-shapes:
     runs-on: ubuntu-latest
     steps:
@@ -175,6 +175,8 @@ jobs:
             synn_token_128x2_32_32_pair16_o1_dual_nosqr \
             synn_token_128x2_32_32_pair8_o1 \
             synn_token_128x2_32_32_pair16_o1_hm \
+            synn_token_128x2_32_32_pair16_o1_r4 \
+            synn_token_128x2_32_32_pair16_o1_r2 \
             synn_kp_128x2_32_32 \
             synn_kp_256x2_32_32 \
             synn_token_256x2_32_32 \
@@ -184,6 +186,8 @@ jobs:
             cargo clippy --workspace --all-targets --features "$shape" -- -D warnings
             echo "::endgroup::"
           done
+      - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_r4
+      - run: cargo test -p attic-eval --features synn_token_128x2_32_32_pair16_o1_r2
 
   # The `clip_stats` feature is a measuring build: a counter in the head of a SYNN net, and the
   # `clipstats` command that reads it. It is off in every build above, so nothing there compiles
