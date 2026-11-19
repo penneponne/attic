@@ -27,21 +27,19 @@ env:
   # is selected by `cfg(target_feature = "avx512…")`, which x86-64-v3 does not
   # enable, so CI exercises the portable path. The AVX-512 kernels' own unit
   # tests enable their features per function and probe the CPU at run time, so
-  # they still run on a runner that has the instructions.
+  # they still run on a runner that has the instructions. The two tests that
+  # check a build matches its host are compiled only into a
+  # `-C target-cpu=native` build (`attic-eval/build.rs` emits the cfg), so a
+  # runner with AVX-512 VNNI is not expected to run the SIMD backend here.
   RUSTFLAGS: "-C target-cpu=x86-64-v3"
-  # Tells the two tests that check the build matches its host (`active_backend`
-  # in attic-eval) that this build deliberately does not: a runner with
-  # AVX-512 VNNI is expected to run the scalar backend here. Without it those
-  # tests fail on whichever runners happen to have that CPU.
-  ATTIC_BASELINE_BUILD: "1"
 
 # The network shape is a build-time feature and exactly one must be selected
 # (`attic-eval` refuses to compile with none or two), so `--all-features` can
 # neither build nor test anything. Each job below runs once per shape instead.
-# `args` is what follows `cargo <verb>` to pick it; the thirteenth entry is the
+# `args` is what follows `cargo <verb>` to pick it; the fourteenth entry is the
 # build that must match YaneuraOu node for node (`ref_check_time` moves the
 # time checks to where the reference's are), which turns off the defaults.
-# The list is written out in each job on purpose: it is the same thirteen
+# The list is written out in each job on purpose: it is the same fourteen
 # entries three times, and kept that way rather than behind a YAML anchor so that
 # no workflow parser has to support one for CI to start at all.
 #
@@ -67,6 +65,33 @@ env:
 # (`hce_fit_qsearched`) changes only the coefficients, which that test does not
 # read, so it is not a row of its own.
 jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: wasm/core/package-lock.json
+      - run: rustup target add wasm32-wasip1 wasm32-wasip1-threads
+      - name: Build both WASM targets
+        run: |
+          unset RUSTFLAGS
+          cargo build --locked --release -p attic-wasm --target wasm32-wasip1 --features hce_material_17
+          cargo build --locked --release -p attic-wasm --target wasm32-wasip1-threads --features hce_material_17
+      - run: cargo build --locked --release -p attic --features hce_material_17
+      - run: npm --prefix wasm/core ci
+      - run: npm --prefix wasm/core run build
+      - name: Compare WASM and native USI searches
+        run: >-
+          timeout 30s node wasm/core/test/smoke.mjs
+          target/wasm32-wasip1/release/attic_wasm.wasm
+          target/wasm32-wasip1-threads/release/attic_wasm.wasm
+          target/release/attic
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -81,29 +106,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: nnue-kp
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time
@@ -173,9 +200,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             shape: synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             shape: synn_token_128x2_32_32_pair16_m8_f2
     steps:
       - uses: actions/checkout@v4
@@ -194,29 +221,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: nnue-kp
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time
@@ -236,29 +265,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: sfnn-1536
+          - name: sfnn_halfkahm2_1536_15_32_k3k3
             args: --features sfnn_halfkahm2_1536_15_32_k3k3
-          - name: sfnn-1024
+          - name: sfnn_halfkahm2_1024_15_64_progress8kpabs
             args: --features sfnn_halfkahm2_1024_15_64_progress8kpabs
-          - name: sfnn-1024-ek
+          - name: sfnn_halfkahm2_1024_15_64_progress8ek
             args: --features sfnn_halfkahm2_1024_15_64_progress8ek
-          - name: sfnn-2304
+          - name: sfnn_halfkahm2_2304_15_64_progress8ek
             args: --features sfnn_halfkahm2_2304_15_64_progress8ek
-          - name: nnue-kp
+          - name: sfnn_halfkahm2_threat_1024_15_64_8gp
+            args: --features sfnn_halfkahm2_threat_1024_15_64_8gp
+          - name: nnue_kp_256x2_32_32
             args: --features nnue_kp_256x2_32_32
-          - name: nnue-halfkp
+          - name: nnue_halfkp_256x2_32_32
             args: --features nnue_halfkp_256x2_32_32
-          - name: nnue-halfkp-128
+          - name: nnue_halfkp_128x2_32_32
             args: --features nnue_halfkp_128x2_32_32
-          - name: nnue-halfkp-768
+          - name: nnue_halfkp_768x2_16_64
             args: --features nnue_halfkp_768x2_16_64
-          - name: synn-token
+          - name: synn_token_128x2_32_32
             args: --features synn_token_128x2_32_32
-          - name: synn-token-pair16-m8-f2
+          - name: synn_token_128x2_32_32_pair16_m8_f2
             args: --features synn_token_128x2_32_32_pair16_m8_f2
-          - name: hce-material
+          - name: hce_material_17
             args: --features hce_material_17
-          - name: hce-mobility
+          - name: hce_mobility_107_57
             args: --features hce_mobility_107_57
           - name: yaneuraou-parity
             args: --no-default-features --features nnue_kp_256x2_32_32,ref_check_time

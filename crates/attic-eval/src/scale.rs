@@ -16,7 +16,13 @@ use std::sync::atomic::{AtomicI32, Ordering};
 ///
 /// The SFNN shape NAGISA ships was trained at 28, so a caller loading that
 /// network must pass `FV_SCALE 28` rather than rely on this.
+#[cfg(not(feature = "sfnn_threat"))]
 pub const FV_SCALE_DEFAULT: i32 = 16;
+
+/// Sirius's default (`FV_SCALE` is 26 in its build), which is what its fixtures were
+/// captured under and what its network is divided by.
+#[cfg(feature = "sfnn_threat")]
+pub const FV_SCALE_DEFAULT: i32 = 26;
 
 static FV_SCALE: AtomicI32 = AtomicI32::new(FV_SCALE_DEFAULT);
 

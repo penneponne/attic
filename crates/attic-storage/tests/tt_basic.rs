@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! cluster_index_pre_side = mul_hi64(key, 32768) = key >> 49
-//! in_cluster_key_frag    = key & 0xffff
+//! in_cluster_tag         = key & 0x1fffff
 //! ```
 //!
 //! Those ranges are disjoint, so [`key`] can set each independently. The
@@ -16,10 +16,15 @@
 use attic_storage::{Bound, DEPTH_NONE, TTData, TranspositionTable};
 
 /// Build a key that lands in cluster `hi` (before the side fold) with
-/// in-cluster fragment `frag`. Requires `hi < 2¹⁵`.
+/// in-cluster tag `frag`. Requires `hi < 2¹⁵`.
 fn key(hi: u64, frag: u16) -> u64 {
     assert!(hi < (1 << 15));
     (hi << 49) | frag as u64
+}
+
+/// A probe's move check that accepts every stored move.
+fn any(_: u16) -> bool {
+    true
 }
 
 /// Probe `k` and store through the returned writer, at the table's current
@@ -37,7 +42,7 @@ fn store(
     eval: i32,
 ) {
     let generation = tt.generation();
-    let (_, _, w) = tt.probe(k, side);
+    let (_, _, w) = tt.probe(k, side, any);
     w.write(k, value, pv, bound, depth, mv, eval, generation);
 }
 
@@ -50,7 +55,7 @@ fn store_probe_round_trip_every_field() {
     let k = key(100, 0x1234);
     let side = 0;
 
-    let (found, data, w) = tt.probe(k, side);
+    let (found, data, w) = tt.probe(k, side, any);
     assert!(!found);
     assert_eq!(data, miss_sentinel());
     w.write(
@@ -64,7 +69,7 @@ fn store_probe_round_trip_every_field() {
         tt_generation_zero(),
     );
 
-    let (found, data, _) = tt.probe(k, side);
+    let (found, data, _) = tt.probe(k, side, any);
     assert!(found);
     assert_eq!(data.value, -321);
     assert_eq!(data.eval, -654);
@@ -89,7 +94,7 @@ fn every_bound_and_pv_combination_round_trips() {
             let frag = 0x100 + (i as u16) * 2 + pv as u16;
             let k = key(7, frag);
             store(&mut tt, k, side, 10 + i as i32, pv, bound, 5, frag, -10);
-            let (found, data, _) = tt.probe(k, side);
+            let (found, data, _) = tt.probe(k, side, any);
             assert!(found, "bound={bound:?} pv={pv} should be found");
             assert_eq!(data.bound, bound);
             assert_eq!(data.is_pv, pv);
@@ -118,15 +123,15 @@ fn miss_on_wrong_key() {
         100,
     );
 
-    let (found, data, _) = tt.probe(key(42, 0xBEE0), side);
+    let (found, data, _) = tt.probe(key(42, 0xBEE0), side, any);
     assert!(!found);
     assert_eq!(data, miss_sentinel());
 
-    let (found, _, _) = tt.probe(key(99, 0xBEEF), side);
+    let (found, _, _) = tt.probe(key(99, 0xBEEF), side, any);
     assert!(!found);
 
     // The opposite side lands in a different cluster.
-    let (found, _, _) = tt.probe(stored, 1);
+    let (found, _, _) = tt.probe(stored, 1, any);
     assert!(!found);
 }
 
@@ -150,19 +155,22 @@ fn replacement_evicts_lowest_priority_entry() {
     store(&mut tt, key(hi, 2), side, 0, false, Bound::Lower, 5, 2, 0);
     store(&mut tt, key(hi, 3), side, 0, false, Bound::Lower, 20, 3, 0);
 
-    assert!(tt.probe(key(hi, 1), side).0);
-    assert!(tt.probe(key(hi, 2), side).0);
-    assert!(tt.probe(key(hi, 3), side).0);
+    assert!(tt.probe(key(hi, 1), side, any).0);
+    assert!(tt.probe(key(hi, 2), side, any).0);
+    assert!(tt.probe(key(hi, 3), side, any).0);
 
     store(&mut tt, key(hi, 4), side, 0, false, Bound::Lower, 1, 4, 0);
 
     assert!(
-        !tt.probe(key(hi, 2), side).0,
+        !tt.probe(key(hi, 2), side, any).0,
         "frag 2 should have been evicted"
     );
-    assert!(tt.probe(key(hi, 1), side).0, "frag 1 should survive");
-    assert!(tt.probe(key(hi, 3), side).0, "frag 3 should survive");
-    assert!(tt.probe(key(hi, 4), side).0, "frag 4 should now be present");
+    assert!(tt.probe(key(hi, 1), side, any).0, "frag 1 should survive");
+    assert!(tt.probe(key(hi, 3), side, any).0, "frag 3 should survive");
+    assert!(
+        tt.probe(key(hi, 4), side, any).0,
+        "frag 4 should now be present"
+    );
 }
 
 #[test]
@@ -193,20 +201,23 @@ fn generation_aging_lowers_replacement_priority() {
     store(&mut tt, key(hi, 2), side, 0, false, Bound::Lower, 3, 2, 0);
     store(&mut tt, key(hi, 3), side, 0, false, Bound::Lower, 8, 3, 0);
 
-    assert!(tt.probe(key(hi, 1), side).0);
-    assert!(tt.probe(key(hi, 2), side).0);
-    assert!(tt.probe(key(hi, 3), side).0);
+    assert!(tt.probe(key(hi, 1), side, any).0);
+    assert!(tt.probe(key(hi, 2), side, any).0);
+    assert!(tt.probe(key(hi, 3), side, any).0);
 
     store(&mut tt, key(hi, 4), side, 0, false, Bound::Lower, 1, 4, 3);
     assert!(
-        !tt.probe(key(hi, 1), side).0,
+        !tt.probe(key(hi, 1), side, any).0,
         "aged deep entry P should be evicted"
     );
     assert!(
-        tt.probe(key(hi, 2), side).0,
+        tt.probe(key(hi, 2), side, any).0,
         "fresh shallow entry Q should survive"
     );
-    assert!(tt.probe(key(hi, 3), side).0, "fresh entry R should survive");
+    assert!(
+        tt.probe(key(hi, 3), side, any).0,
+        "fresh entry R should survive"
+    );
 }
 
 #[test]
@@ -222,7 +233,7 @@ fn save_preserves_move_when_new_move_absent() {
     store(&mut tt, k, side, 1, false, Bound::Lower, 10, 0x0777, 1);
     store(&mut tt, k, side, 2, false, Bound::Lower, 12, 0, 2);
 
-    let (found, data, _) = tt.probe(k, side);
+    let (found, data, _) = tt.probe(k, side, any);
     assert!(found);
     assert_eq!(
         data.move16, 0x0777,
@@ -230,6 +241,139 @@ fn save_preserves_move_when_new_move_absent() {
     );
     assert_eq!(data.value, 2, "value refreshed");
     assert_eq!(data.depth, 12, "depth refreshed");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn tags_are_the_low_21_key_bits() {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let side = 0;
+    let hi = 400;
+    let k = key(hi, 0x5);
+
+    store(&mut tt, k, side, 9, false, Bound::Lower, 6, 0, 9);
+
+    // Bits 16..21 are part of the tag.
+    assert!(!tt.probe(k | 1 << 16, side, any).0);
+    assert!(!tt.probe(k | 1 << 20, side, any).0);
+    // Bits 21..49 are neither tag nor cluster index: such a key collides.
+    let (found, data, _) = tt.probe(k | 1 << 21, side, any);
+    assert!(found, "a key differing only above the tag reads the entry");
+    assert_eq!(data.value, 9);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn tag_match_whose_move_does_not_rebuild_is_a_miss() {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let side = 0;
+    let k = key(500, 0x77);
+    let generation = tt.generation();
+    let not_0111 = |m: u16| m != 0x0111;
+
+    // Entry 0: the tag matches, its move does not rebuild.
+    store(&mut tt, k, side, 11, false, Bound::Lower, 10, 0x0111, 0);
+
+    let (found, data, w) = tt.probe(k, side, not_0111);
+    assert!(!found);
+    assert_eq!(data, miss_sentinel());
+    // The miss's writer targets the replacement slot, so a second entry with
+    // the same tag lands beside the first.
+    w.write(k, 22, false, Bound::Lower, 4, 0x0222, 0, generation);
+
+    // The later entry is taken when the first one's move does not rebuild…
+    let (found, data, _) = tt.probe(k, side, not_0111);
+    assert!(found);
+    assert_eq!((data.value, data.move16), (22, 0x0222));
+    // …and the lowest one is taken when it does.
+    let (found, data, _) = tt.probe(k, side, any);
+    assert!(found);
+    assert_eq!((data.value, data.move16), (11, 0x0111));
+    // No entry rebuilds: a miss.
+    assert!(!tt.probe(k, side, |_| false).0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn tag_match_without_a_move_is_a_hit_whatever_the_check() {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let side = 1;
+    let k = key(600, 0x99);
+
+    store(&mut tt, k, side, 5, false, Bound::Upper, 3, 0, 5);
+    let (found, data, _) = tt.probe(k, side, |_| false);
+    assert!(found);
+    assert_eq!(data.value, 5);
+}
+
+/// Store at `depth` with `bound` and `value`, then write the same key again at
+/// depth 0 with no move, a write the replacement rule refuses; returns the
+/// depth read back afterwards.
+fn depth_after_refused_write(depth: i32, bound: Bound, value: i32) -> i32 {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let k = key(700, 0x31);
+    store(&mut tt, k, 0, value, false, bound, depth, 0x0123, 0);
+    store(&mut tt, k, 0, 0, false, Bound::Lower, 0, 0, 0);
+    let (found, data, _) = tt.probe(k, 0, any);
+    assert!(found);
+    assert_eq!(data.value, value, "a refused write keeps the value");
+    assert_eq!(data.move16, 0x0123, "a refused write keeps the move");
+    data.depth
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn secondary_aging_shortens_a_kept_decisive_non_exact_entry() {
+    let mate = 32000 - 10;
+    let mated = -32000 + 10;
+
+    assert_eq!(depth_after_refused_write(10, Bound::Lower, mate), 9);
+    assert_eq!(depth_after_refused_write(10, Bound::Upper, mated), 9);
+    // Depth 5 is the shallowest that ages.
+    assert_eq!(depth_after_refused_write(5, Bound::Lower, mate), 4);
+    assert_eq!(depth_after_refused_write(4, Bound::Lower, mate), 4);
+    // An exact entry, or a non-decisive value, is left alone.
+    assert_eq!(depth_after_refused_write(10, Bound::Exact, mate), 10);
+    assert_eq!(depth_after_refused_write(10, Bound::Lower, 1500), 10);
+    // The smallest decisive magnitude ages; one below it does not.
+    assert_eq!(depth_after_refused_write(10, Bound::Lower, 32000 - 246), 9);
+    assert_eq!(depth_after_refused_write(10, Bound::Lower, 32000 - 247), 10);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn penalize_lowers_the_stored_depth_and_floors_at_unoccupied() {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let k = key(710, 0x77);
+    store(&mut tt, k, 1, 120, false, Bound::Upper, 10, 0x0456, -3);
+
+    let (_, _, w) = tt.probe(k, 1, any);
+    w.penalize(1);
+    let (found, data, slot) = tt.locate(k, 1, any);
+    assert!(found);
+    assert_eq!(data.depth, 9);
+    assert_eq!(data.value, 120, "only the depth changes");
+    assert_eq!(data.move16, 0x0456);
+
+    tt.penalize_at(slot, 2);
+    assert_eq!(tt.probe(k, 1, any).1.depth, 7);
+
+    // `DEPTH_NONE + 1` is the shallowest occupied depth; a larger penalty
+    // leaves the entry unoccupied rather than wrapping.
+    let k = key(711, 0x78);
+    store(&mut tt, k, 1, 0, false, Bound::Lower, DEPTH_NONE + 1, 0, 0);
+    let (found, data, w) = tt.probe(k, 1, any);
+    assert!(found);
+    assert_eq!(data.depth, DEPTH_NONE + 1);
+    w.penalize(3);
+    let (found, data, _) = tt.probe(k, 1, any);
+    assert!(!found);
+    assert_eq!(data.depth, DEPTH_NONE);
 }
 
 #[test]
@@ -245,14 +389,17 @@ fn resize_sizes_by_formula_and_clears() {
 
     let k = key(1, 0x1);
     store(&mut tt, k, 0, 5, false, Bound::Exact, 9, 0x1, 5);
-    assert!(tt.probe(k, 0).0);
+    assert!(tt.probe(k, 0, any).0);
 
     tt.resize(2);
     assert_eq!(tt.cluster_count(), 2 * 32_768);
-    assert!(!tt.probe(k, 0).0, "resize to a new size clears the table");
+    assert!(
+        !tt.probe(k, 0, any).0,
+        "resize to a new size clears the table"
+    );
 
     store(&mut tt, k, 0, 7, false, Bound::Exact, 9, 0x1, 7);
-    assert_eq!(tt.probe(k, 0).1.value, 7);
+    assert_eq!(tt.probe(k, 0, any).1.value, 7);
 }
 
 #[test]
@@ -273,7 +420,24 @@ fn resize_to_same_size_is_a_no_op() {
         before,
         "same-size resize leaves the table intact"
     );
-    assert!(tt.probe(k, 0).0);
+    assert!(tt.probe(k, 0, any).0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn reallocate_to_same_size_clears() {
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let k = key(5, 0x9);
+    store(&mut tt, k, 0, 5, false, Bound::Exact, 9, 0x9, 5);
+    assert!(tt.probe(k, 0, any).0);
+
+    tt.reallocate(1);
+    assert_eq!(tt.cluster_count(), 32_768);
+    assert!(
+        !tt.probe(k, 0, any).0,
+        "a forced reallocation starts from an empty table"
+    );
 }
 
 #[test]
@@ -284,11 +448,84 @@ fn clear_zeroes_entries_and_generation() {
     tt.new_search();
     let k = key(11, 0x22);
     store(&mut tt, k, 0, 5, false, Bound::Exact, 9, 0x22, 5);
-    assert!(tt.probe(k, 0).0);
+    assert!(tt.probe(k, 0, any).0);
 
     tt.clear();
     assert_eq!(tt.generation(), 0, "clear resets generation");
-    assert!(!tt.probe(k, 0).0, "clear empties every entry");
+    assert!(!tt.probe(k, 0, any).0, "clear empties every entry");
+}
+
+/// Fill `tt` (sized at 1 MiB) so that every cluster holds entries and the
+/// generation is non-zero.
+fn fill_every_cluster(tt: &mut TranspositionTable) {
+    tt.new_search();
+    for hi in 0..(1u64 << 15) {
+        for side in 0..2u8 {
+            for frag in 1..=3u16 {
+                store(tt, key(hi, frag), side, 5, true, Bound::Exact, 9, frag, 5);
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn clear_with_threads_empties_every_entry_at_any_thread_count() {
+    let mut empty = TranspositionTable::new();
+    empty.resize(1);
+    let empty_sum = empty.checksum();
+
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    // Thread counts that do and do not divide the table's byte size, and one
+    // whose stride is not a whole number of clusters.
+    for threads in [1usize, 2, 3, 7, 64] {
+        fill_every_cluster(&mut tt);
+        assert_ne!(tt.checksum(), empty_sum);
+
+        tt.clear_with_threads(threads, |_| {});
+        assert_eq!(tt.generation(), 0, "{threads} threads: generation reset");
+        assert_eq!(
+            tt.checksum(),
+            empty_sum,
+            "{threads} threads: every entry cleared",
+        );
+    }
+
+    fill_every_cluster(&mut tt);
+    tt.clear();
+    assert_eq!(tt.checksum(), empty_sum, "single-thread clear");
+}
+
+#[test]
+fn clear_with_threads_starts_each_thread_once() {
+    use std::sync::Mutex;
+
+    let mut tt = TranspositionTable::new();
+    tt.resize(1);
+    let started = Mutex::new(Vec::new());
+    tt.clear_with_threads(5, |i| started.lock().unwrap().push(i));
+    let mut started = started.into_inner().unwrap();
+    started.sort_unstable();
+    assert_eq!(started, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn clear_with_threads_on_an_unsized_table_is_a_no_op() {
+    let mut tt = TranspositionTable::new();
+    tt.new_search();
+    tt.clear_with_threads(4, |_| {});
+    assert_eq!(tt.cluster_count(), 0);
+    assert_eq!(tt.generation(), 0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn resize_reports_whether_it_allocated() {
+    let mut tt = TranspositionTable::new();
+    assert!(tt.resize(1));
+    assert!(!tt.resize(1));
+    assert!(tt.resize(2));
 }
 
 #[test]
@@ -371,7 +608,7 @@ fn fresh_resize_reads_back_all_misses() {
             // A nonzero fragment cannot match the zeroed entries' `key == 0`,
             // so this takes the true miss path.
             let k = key(hi & 0x7fff, (hi as u16).wrapping_mul(7) | 1);
-            let (found, data, _) = tt.probe(k, side);
+            let (found, data, _) = tt.probe(k, side, any);
             assert!(!found, "fresh table entry occupied at hi={hi}");
             assert_eq!(data, miss_sentinel());
         }
@@ -394,9 +631,9 @@ fn resize_grow_shrink_same_cycles_preserve_semantics() {
             assert_eq!(tt.checksum(), prev_sum, "same-size resize must be a no-op");
         } else {
             assert_eq!(tt.backing_ptr_addr() % EXPECTED_TT_ALIGN, 0);
-            assert!(!tt.probe(k, 0).0, "grow/shrink clears the table");
+            assert!(!tt.probe(k, 0, any).0, "grow/shrink clears the table");
             store(&mut tt, k, 0, 42, false, Bound::Exact, 9, 0xabcd, 42);
-            assert_eq!(tt.probe(k, 0).1.value, 42);
+            assert_eq!(tt.probe(k, 0, any).1.value, 42);
         }
     }
 }
@@ -412,36 +649,44 @@ fn many_resizes_do_not_leak_or_corrupt() {
         tt.resize(mb);
         let k = key(i & 0x7fff, i as u16);
         store(&mut tt, k, 0, 3, false, Bound::Exact, 5, i as u16, 3);
-        assert!(tt.probe(k, 0).0);
+        assert!(tt.probe(k, 0, any).0);
     }
 }
 
 /// Linux-only THP-uptake check: after a >= 64 MiB resize, scan
 /// `/proc/self/smaps` for the mapping that contains the TT base address and
-/// read its `AnonHugePages` figure.
+/// read its `AnonHugePages` figure right after the allocation and again after a
+/// multi-threaded clear has written it.
 ///
-/// On a machine whose `transparent_hugepage/enabled` is `[always]` or
-/// `[madvise]` this is a hard gate, because zero there is not a machine
+/// The allocation writes nothing, so the first figure is only reported. After
+/// the clear, on a machine whose `transparent_hugepage/enabled` is `[always]`
+/// or `[madvise]`, this is a hard gate, because zero there is not a machine
 /// property but a bug: the table is hinted with `MADV_HUGEPAGE`, and the hint
-/// only governs pages faulted in after it, so zeroing the region before the
-/// hint leaves the whole table on 4 KiB pages for its whole life. That is
-/// exactly what happened, and it went unnoticed for as long as this test only
-/// printed the number. The gate is `> 0` rather than the full size: under
-/// memory fragmentation the kernel may back only part of the region with huge
-/// pages, and that is a property of the machine, not of the allocator.
+/// only governs pages faulted in after it, so a write before the hint leaves
+/// the whole table on 4 KiB pages for its whole life. The gate is `> 0` rather
+/// than the full size: under memory fragmentation the kernel may back only part
+/// of the region with huge pages, and that is a property of the machine, not of
+/// the allocator.
 ///
-/// Where THP is off, or the kernel does not account for it, the figure is
+/// Where THP is off, or the kernel does not account for it, the figures are
 /// reported and nothing is asserted.
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(miri, ignore)]
 fn thp_uptake_over_64mib() {
-    use std::fs;
-
     let mut tt = TranspositionTable::new();
     tt.resize(64); // large enough that the kernel can back it with huge pages
     let base = tt.backing_ptr_addr();
     assert_ne!(base, 0);
+
+    report_anon_huge_pages("after allocation", base, false);
+    tt.clear_with_threads(2, |_| {});
+    report_anon_huge_pages("after a 2-thread clear", base, true);
+}
+
+#[cfg(target_os = "linux")]
+fn report_anon_huge_pages(when: &str, base: usize, gate: bool) {
+    use std::fs;
 
     let smaps = match fs::read_to_string("/proc/self/smaps") {
         Ok(s) => s,
@@ -484,9 +729,9 @@ fn thp_uptake_over_64mib() {
 
     match anon_huge_kb {
         Some(kb) => {
-            eprintln!("THP: TT region at {base:#x} backed by {kb} kB AnonHugePages");
+            eprintln!("THP ({when}): TT region at {base:#x} backed by {kb} kB AnonHugePages");
             assert!(
-                !thp_available || kb > 0,
+                !gate || !thp_available || kb > 0,
                 "the 64 MiB table is entirely on 4 KiB pages although this machine \
                  offers transparent huge pages; the region was almost certainly \
                  written to before it was hinted with MADV_HUGEPAGE"

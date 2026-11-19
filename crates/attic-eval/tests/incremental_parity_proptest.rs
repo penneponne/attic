@@ -25,7 +25,8 @@
 //! # Network file
 //!
 //! The network is staged locally and never committed, so when it is absent the
-//! test prints a notice and passes.
+//! test prints a notice and passes. The threat shape reads Sirius's, from
+//! `$ATTIC_SIRIUS_REF/eval/nn.bin`.
 
 // Manaka's shapes have no kernel backend to report and read their own `nn.bin`
 // container, not YaneuraOu's `eval/nn.bin`; `sym_network.rs` is their test. The hand-crafted shapes have no
@@ -44,6 +45,16 @@ use proptest::test_runner::TestCaseError;
 /// pays for a full accumulator refresh plus two evaluations.
 const MAX_PLIES: usize = 24;
 
+/// The threat shape reads Sirius's file, which lives with the reference material
+/// (`ATTIC_SIRIUS_REF`, see `sirius_parity.rs`) and not under `eval/`.
+#[cfg(feature = "sfnn_threat")]
+fn nn_bin_path() -> PathBuf {
+    std::env::var_os("ATTIC_SIRIUS_REF")
+        .map(|dir| PathBuf::from(dir).join("eval/nn.bin"))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/nn.bin"))
+}
+
+#[cfg(not(feature = "sfnn_threat"))]
 fn nn_bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
