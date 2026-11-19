@@ -488,7 +488,7 @@ pub struct QSearch<'a> {
     acc_depth: usize,
     /// Ordinary move deltas are saved until the next NNUE evaluation.
     #[cfg(any(
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         all(
             target_family = "wasm",
             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -497,7 +497,7 @@ pub struct QSearch<'a> {
     acc_pending: Box<[Option<MoveDelta>; ACC_LEN]>,
     /// The deepest materialized accumulator on the active path.
     #[cfg(any(
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         all(
             target_family = "wasm",
             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -761,7 +761,7 @@ impl<'a> QSearch<'a> {
                 .expect("ACC_LEN slots collected"),
             acc_depth: 0,
             #[cfg(any(
-                feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                feature = "sfnn_halfka2304",
                 all(
                     target_family = "wasm",
                     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -769,7 +769,7 @@ impl<'a> QSearch<'a> {
             ))]
             acc_pending: Box::new([None; ACC_LEN]),
             #[cfg(any(
-                feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                feature = "sfnn_halfka2304",
                 all(
                     target_family = "wasm",
                     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1117,7 +1117,7 @@ impl<'a> QSearch<'a> {
     #[inline]
     fn static_eval(&mut self, pos: &Position) -> Value {
         #[cfg(any(
-            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            feature = "sfnn_halfka2304",
             all(
                 target_family = "wasm",
                 feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1142,7 +1142,7 @@ impl<'a> QSearch<'a> {
         let net = self.net;
         self.acc_depth = 0;
         #[cfg(any(
-            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            feature = "sfnn_halfka2304",
             all(
                 target_family = "wasm",
                 feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1173,7 +1173,7 @@ impl<'a> QSearch<'a> {
     /// both feature-index lists, so deriving its accumulator does not read
     /// the current board or update the king-refresh cache.
     #[cfg(any(
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         all(
             target_family = "wasm",
             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1208,7 +1208,7 @@ impl<'a> QSearch<'a> {
         shared.correction_prefetch(post_pos.non_pawn_key(Color::Black), us);
 
         #[cfg(any(
-            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            feature = "sfnn_halfka2304",
             all(
                 target_family = "wasm",
                 feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1237,7 +1237,7 @@ impl<'a> QSearch<'a> {
         );
         self.acc_depth = d + 1;
         #[cfg(any(
-            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            feature = "sfnn_halfka2304",
             all(
                 target_family = "wasm",
                 feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1254,7 +1254,7 @@ impl<'a> QSearch<'a> {
     fn pop_accumulator(&mut self) {
         self.acc_depth -= 1;
         #[cfg(any(
-            feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+            feature = "sfnn_halfka2304",
             all(
                 target_family = "wasm",
                 feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
@@ -1900,7 +1900,7 @@ impl QSearch<'_> {
                     // Slot 0 still holds the root refresh seeded above.
                     self.acc_depth = 0;
                     #[cfg(any(
-                        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+                        feature = "sfnn_halfka2304",
                         all(
                             target_family = "wasm",
                             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"

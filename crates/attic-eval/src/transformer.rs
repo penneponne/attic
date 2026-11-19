@@ -328,7 +328,7 @@ impl Accumulator {
     /// # Panics
     /// Panics if this delta requires a full refresh for either perspective.
     #[cfg(any(
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         all(
             target_family = "wasm",
             feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"

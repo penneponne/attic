@@ -23,7 +23,8 @@ quick-draw = ["attic-state/quick-draw", "attic-eval/quick-draw"]
 sfnn_halfkahm2_1536_15_32_k3k3 = ["attic-eval/sfnn_halfkahm2_1536_15_32_k3k3", "sfnn"]
 sfnn_halfkahm2_1024_15_64_progress8kpabs = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8kpabs", "sfnn_progress"]
 sfnn_halfkahm2_1024_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_1024_15_64_progress8ek", "sfnn_progress"]
-sfnn_halfkahm2_2304_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_2304_15_64_progress8ek", "sfnn_progress"]
+sfnn_halfkahm2_2304_15_64_progress8 = ["attic-eval/sfnn_halfkahm2_2304_15_64_progress8", "sfnn_halfka2304"]
+sfnn_halfkahm2_2304_15_64_progress8ek = ["attic-eval/sfnn_halfkahm2_2304_15_64_progress8ek", "sfnn_halfka2304"]
 sfnn_halfkahm2_threat_1024_15_64_8gp = ["attic-eval/sfnn_halfkahm2_threat_1024_15_64_8gp", "sfnn_threat"]
 nnue_kp_256x2_32_32 = ["attic-eval/nnue_kp_256x2_32_32"]
 nnue_kp_128x2_32_32 = ["attic-eval/nnue_kp_128x2_32_32"]
@@ -50,6 +51,7 @@ hce_fit_qsearched = ["attic-eval/hce_fit_qsearched"]
 # selects a network; a shape turns on the ones that describe it.
 #   sfnn            every SFNN shape: HalfKA_hm2, a shortcut row in fc_0
 #   sfnn_progress   ... whose stack comes from a `progress.bin` beside `nn.bin`
+#   sfnn_halfka2304 ... with a 2304-wide transformer
 #   sfnn_threat     ... that adds the threat features and picks its stack by an integer
 #                   game-phase sum (Sirius); no `progress.bin`
 #   sym             every Manaka shape: a network, but one the tests cannot build
@@ -58,6 +60,7 @@ hce_fit_qsearched = ["attic-eval/hce_fit_qsearched"]
 #                   tests that build a synthetic one to build
 sfnn = []
 sfnn_progress = ["sfnn"]
+sfnn_halfka2304 = ["sfnn_progress"]
 sfnn_threat = ["sfnn"]
 sym = []
 hce = []

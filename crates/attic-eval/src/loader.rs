@@ -1099,7 +1099,7 @@ mod tests {
     /// Skipped unless `ATTIC_HALFKA2304_NN` names a file — the network is
     /// 180MB and lives outside this repository.
     #[test]
-    fn loads_sfnn_halfkahm2_2304_15_64_progress8ek_network() {
+    fn loads_sfnn_halfkahm2_2304_15_64_network() {
         let Ok(path) = std::env::var("ATTIC_HALFKA2304_NN") else {
             return;
         };

@@ -35,6 +35,7 @@ use attic_storage::{ArenaLayout, ArenaSlice, LargePageArena, Section};
     feature = "sfnn_halfkahm2_1536_15_32_k3k3",
     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
     feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
+    feature = "sfnn_halfkahm2_2304_15_64_progress8",
     feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
     feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
     feature = "nnue_kp_256x2_32_32",
@@ -49,7 +50,7 @@ use attic_storage::{ArenaLayout, ArenaSlice, LargePageArena, Section};
 compile_error!(
     "select a network: --features sfnn_halfkahm2_1536_15_32_k3k3, \
      sfnn_halfkahm2_1024_15_64_progress8kpabs, sfnn_halfkahm2_1024_15_64_progress8ek, \
-     sfnn_halfkahm2_2304_15_64_progress8ek, sfnn_halfkahm2_threat_1024_15_64_8gp, \
+     sfnn_halfkahm2_2304_15_64_progress8, sfnn_halfkahm2_2304_15_64_progress8ek, sfnn_halfkahm2_threat_1024_15_64_8gp, \
      nnue_kp_256x2_32_32, nnue_kp_128x2_32_32, nnue_halfkp_256x2_32_32, nnue_halfkp_128x2_32_32, nnue_halfkp_768x2_16_64, one of the synn_* shapes listed in \
      attic-eval's Cargo.toml, hce_material_17 or hce_mobility_107_57"
 );
@@ -66,7 +67,7 @@ compile_error!(
     any(
         feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
         feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
@@ -83,7 +84,7 @@ compile_error!("sfnn_halfkahm2_1536_15_32_k3k3 is a different network from the r
     feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs",
     any(
         feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
@@ -101,7 +102,7 @@ compile_error!(
 #[cfg(all(
     feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
     any(
-        feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+        feature = "sfnn_halfka2304",
         feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
         feature = "nnue_kp_128x2_32_32",
@@ -117,7 +118,7 @@ compile_error!(
 );
 
 #[cfg(all(
-    feature = "sfnn_halfkahm2_2304_15_64_progress8ek",
+    feature = "sfnn_halfka2304",
     any(
         feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
         feature = "nnue_kp_256x2_32_32",
@@ -129,9 +130,13 @@ compile_error!(
         feature = "hce"
     )
 ))]
-compile_error!(
-    "sfnn_halfkahm2_2304_15_64_progress8ek is a different network from the rest; select one"
-);
+compile_error!("the HalfKA 2304 shapes are different networks from the rest; select one");
+
+#[cfg(all(
+    feature = "sfnn_halfkahm2_2304_15_64_progress8",
+    feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
+))]
+compile_error!("the two HalfKA 2304 shapes select different layer stacks; select one");
 
 #[cfg(all(
     feature = "sfnn_halfkahm2_threat_1024_15_64_8gp",
@@ -222,7 +227,7 @@ pub const HIDDEN_SIZE: usize = 1_536;
     feature = "sfnn_halfkahm2_threat_1024_15_64_8gp"
 ))]
 pub const HIDDEN_SIZE: usize = 1_024;
-#[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+#[cfg(feature = "sfnn_halfka2304")]
 pub const HIDDEN_SIZE: usize = 2_304;
 #[cfg(any(feature = "nnue_kp_256x2_32_32", feature = "nnue_halfkp_256x2_32_32"))]
 pub const HIDDEN_SIZE: usize = 256;
@@ -1200,7 +1205,7 @@ mod tests {
             feature = "sfnn_halfkahm2_threat_1024_15_64_8gp"
         ))]
         assert_eq!(HIDDEN_SIZE, 1024);
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(feature = "sfnn_halfka2304")]
         assert_eq!(HIDDEN_SIZE, 2304);
         #[cfg(any(feature = "nnue_kp_256x2_32_32", feature = "nnue_halfkp_256x2_32_32"))]
         assert_eq!(HIDDEN_SIZE, 256);
@@ -1339,7 +1344,7 @@ mod tests {
             feature = "sfnn_halfkahm2_1024_15_64_progress8ek"
         ))]
         assert_same_dims(&NetDims::STANDARD, &NetDims::HALFKA1024);
-        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        #[cfg(feature = "sfnn_halfka2304")]
         assert_same_dims(&NetDims::STANDARD, &NetDims::HALFKA2304);
     }
 
