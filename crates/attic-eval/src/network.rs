@@ -652,7 +652,7 @@ mod tests {
     ///
     /// Skipped unless `ATTIC_HALFKA2304_NN` names the file, as the loader's test
     /// of it is.
-    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    #[cfg(feature = "sfnn_halfka2304")]
     #[test]
     #[cfg_attr(miri, ignore)]
     fn the_v4_network_s_stacks_match_the_unfused_reference() {

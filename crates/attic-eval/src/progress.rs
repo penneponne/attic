@@ -1,22 +1,11 @@
-//! Progress-bucket selection for the `progress8ek` and `progress8kpabs`
-//! layer-stack modes.
+//! Progress-bucket selection for the `progress8`, `progress8kpabs` and
+//! `progress8ek` layer-stack modes.
 //!
-//! Stock SFNN-1536 picks its layer stack from the two kings' ranks
-//! (`king3_by_king3`, nine buckets). The shape NAGISA V4 ships declares
-//! `NNUE_SFNN_HAND_BUCKETS 1`, `NNUE_SFNN_KING_BUCKETS 1` and
-//! `NNUE_SFNN_PROGRESS_BUCKETS 9`, which collapses `stack_index_for_nnue` to
-//! the progress bucket alone — the kings' ranks never enter it.
-//!
-//! Buckets 0..=7 are a game-progress estimate in both modes. They part ways on
-//! mutual entering-king positions, which have a different material and progress
-//! profile from everything else:
-//!
-//! - `progress8ek` (NAGISA V4, 2304) trained them as their own stack, bucket 8.
-//! - `progress8kpabs` (NAGISA V3, 1024) did not. V3 was trained with eight
-//!   buckets, so it never looks for entering kings; those positions get the
-//!   progress bucket like any other, and the ninth stack is in the file but
-//!   nothing selects it. Sending them to bucket 8 anyway would evaluate them
-//!   with weights that were never trained.
+//! NAGISA V4's `progress8` (2304) and NAGISA V3's `progress8kpabs` (1024)
+//! select from the first eight stacks using the same game-progress estimate.
+//! Their network files have a ninth stack, which these modes never select.
+//! The `progress8ek` mode for either width uses that ninth stack for mutual
+//! entering-king positions.
 //!
 //! The two rules are separate pure functions below, [`bucket_progress8ek`] and
 //! [`bucket_progress8kpabs`], so that both are compiled and tested in every
@@ -55,7 +44,7 @@ const BONA_PIECE_ZERO: usize = 0;
 const PROGRESS_VALUE_COUNT: i64 = 256;
 
 /// Layer stacks in a progress network's file. The last is the entering-king
-/// stack under `progress8ek`; under `progress8kpabs` it is present and unused.
+/// stack under `progress8ek`. The other progress modes leave it unused.
 pub const PROGRESS_BUCKETS: usize = 9;
 
 /// The buckets game progress alone is cut into, in both modes: every stack but
@@ -494,7 +483,10 @@ mod tests {
     #[test]
     fn bucket_index_follows_the_mode_of_the_build() {
         let pos = parse_sfen(MUTUAL_ENTERING_KING).unwrap();
-        let ek = cfg!(feature = "sfnn_progress_ek");
+        let ek = cfg!(any(
+            feature = "sfnn_halfkahm2_1024_15_64_progress8ek",
+            feature = "sfnn_halfkahm2_2304_15_64_progress8ek"
+        ));
 
         // Progress 128: bucket 4 by progress, 8 when the kings have entered.
         let mid = flat_table(0).bucket_index(&pos);

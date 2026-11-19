@@ -736,6 +736,7 @@ impl PerspectiveDelta {
 
 /// The per-perspective feature delta a move induces, computed straight from the
 /// pre-move position without the [`active_features`] scan.
+#[derive(Clone, Copy)]
 pub struct MoveDelta {
     halves: [PerspectiveDelta; Color::COUNT],
 }

@@ -8,7 +8,15 @@
 //! for the feature-transformer and element-wise kernels, and those plus
 //! `avx512vnni` for the fused fc chain.
 //!
-//! Both backends stay **compiled unconditionally**, only the call sites being
+//! A third feature set is the WebAssembly one: a build for a wasm target that enables `simd128`
+//! gets `wasm_simd128` and `wasm_simd128_post_ft`, a complete set of kernels (the feature
+//! transformer, the output transform and every dense layer) on 128-bit vectors. The optional
+//! relaxed integer dot product is restricted to 7-bit activations, for which its result is exact.
+//! Each kernel equals the scalar kernel bit for bit. A wasm build without `simd128` runs the scalar kernels. Their modules
+//! compile only for a wasm target with the feature, being made of its intrinsics, and are tested
+//! under a wasm runtime.
+//!
+//! The x86 backends stay **compiled unconditionally**, only the call sites being
 //! `cfg`-gated, so that the SIMD-equals-scalar tests in each backend module keep
 //! exercising both. Those tests probe the CPU at run time, so that they skip
 //! gracefully on a host without the features. The only other run-time probe is
@@ -59,6 +67,17 @@ pub mod avx512_post_ft;
 #[cfg(feature = "sfnn_progress")]
 pub mod group_layout;
 
+// The kernels for a WebAssembly build with `simd128` on (`-C target-feature=+simd128`), the
+// same shapes of work as the AVX2 ones above on 128-bit vectors. Selected by the target
+// features alone, like every other backend, and absent from every other build; a wasm build
+// without `simd128` runs the scalar kernels.
+#[allow(dead_code)]
+#[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+pub mod wasm_simd128;
+#[allow(dead_code)]
+#[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+pub mod wasm_simd128_post_ft;
+
 /// Which kernel backend this build compiled into the forward pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -66,6 +85,8 @@ pub enum Backend {
     Scalar,
     /// AVX-512 F + BW + VNNI kernels (the full SIMD forward pass).
     Avx512Vnni,
+    /// WebAssembly `simd128` kernels (the full forward pass, on 128-bit vectors).
+    WasmSimd128,
 }
 
 /// The kernel backend baked into this build.
@@ -90,14 +111,24 @@ pub const fn active_backend() -> Backend {
     Backend::Avx512Vnni
 }
 
+/// The kernel backend baked into this build, WebAssembly arm: every kernel of the forward
+/// pass has a `simd128` form, so a build that enables the feature runs them all.
+#[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+pub const fn active_backend() -> Backend {
+    Backend::WasmSimd128
+}
+
 /// The kernel backend baked into this build, non-VNNI arm.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "avx512bw",
-    target_feature = "avx512vnni",
-    feature = "sfnn",
-    not(feature = "sfnn_threat")
+#[cfg(not(any(
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni",
+        feature = "sfnn",
+        not(feature = "sfnn_threat")
+    ),
+    all(target_family = "wasm", target_feature = "simd128")
 )))]
 pub const fn active_backend() -> Backend {
     Backend::Scalar
@@ -259,13 +290,27 @@ pub mod transformer_kernel {
     }
 }
 
-/// The portable arm: neither AVX-512 nor AVX2.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    any(
-        all(target_feature = "avx512f", target_feature = "avx512bw"),
-        target_feature = "avx2"
-    )
+/// The WebAssembly arm: a wasm build with `simd128`. The kernels are safe functions with the
+/// scalar ones' signatures, so this arm re-exports them as the portable one does.
+#[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+pub mod transformer_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::wasm_simd128::apply_threat_rows;
+    pub use super::wasm_simd128::{
+        add_features, add_sub_features, add_sub_sub_features, derive_features, sub_features,
+    };
+}
+
+/// The portable arm: neither AVX-512, AVX2 nor wasm `simd128`.
+#[cfg(not(any(
+    all(
+        target_arch = "x86_64",
+        any(
+            all(target_feature = "avx512f", target_feature = "avx512bw"),
+            target_feature = "avx2"
+        )
+    ),
+    all(target_family = "wasm", target_feature = "simd128")
 )))]
 pub mod transformer_kernel {
     #[cfg(feature = "sfnn_threat")]
@@ -473,17 +518,38 @@ pub mod post_ft_kernel {
     }
 }
 
-/// The portable arm: neither AVX-512 nor AVX2.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    any(
-        all(target_feature = "avx512f", target_feature = "avx512bw"),
-        target_feature = "avx2"
-    )
+/// The WebAssembly arm: a wasm build with `simd128`. Complete, unlike the AVX2 arm: the
+/// squared clipped ReLU has a vector form here, and so does the general `affine`, which the
+/// `dot_i16x8` kernel serves for every input byte.
+#[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+pub mod post_ft_kernel {
+    #[cfg(feature = "sfnn_threat")]
+    pub use super::wasm_simd128_post_ft::ewm_one_perspective_file_scale;
+    // The standard shapes alone call the `_wide` form and `clip_to_u7`, the SFNN chains alone the
+    // squared ReLU, and the unfused reference flow alone the general `affine`.
+    #[allow(unused_imports)]
+    pub use super::wasm_simd128_post_ft::{
+        affine, affine_u7, affine_u7_wide, clip_to_u7, clipped_relu, ewm_one_perspective,
+        sqr_clipped_relu,
+    };
+}
+
+/// The portable arm: neither AVX-512, AVX2 nor wasm `simd128`.
+#[cfg(not(any(
+    all(
+        target_arch = "x86_64",
+        any(
+            all(target_feature = "avx512f", target_feature = "avx512bw"),
+            target_feature = "avx2"
+        )
+    ),
+    all(target_family = "wasm", target_feature = "simd128")
 )))]
 pub mod post_ft_kernel {
     #[cfg(feature = "sfnn_threat")]
     pub use super::scalar_post_ft::ewm_one_perspective_file_scale;
+    // Each shape calls a subset of these.
+    #[allow(unused_imports)]
     pub use super::scalar_post_ft::{
         affine, affine_u7, affine_u7_wide, clipped_relu, ewm_one_perspective, sqr_clipped_relu,
     };
@@ -506,6 +572,8 @@ mod tests {
         ));
         let expected = if simd_build {
             Backend::Avx512Vnni
+        } else if cfg!(all(target_family = "wasm", target_feature = "simd128")) {
+            Backend::WasmSimd128
         } else {
             Backend::Scalar
         };

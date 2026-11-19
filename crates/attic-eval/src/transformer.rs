@@ -322,6 +322,34 @@ impl Accumulator {
         }
     }
 
+    /// Apply a delta with precomputed feature indices for both perspectives.
+    /// This can run after later moves have changed the board.
+    ///
+    /// # Panics
+    /// Panics if this delta requires a full refresh for either perspective.
+    #[cfg(any(
+        feature = "sfnn_halfka2304",
+        all(
+            target_family = "wasm",
+            feature = "sfnn_halfkahm2_1024_15_64_progress8kpabs"
+        )
+    ))]
+    pub fn derive_from_delta(src: &Self, dst: &mut Self, net: &NnueNetwork, delta: &MoveDelta) {
+        for color in [Color::Black, Color::White] {
+            let i = color.index();
+            let pd = delta
+                .half(color)
+                .expect("deferred delta cannot depend on the board");
+            transformer_kernel::derive_features(
+                &mut dst.perspectives[i],
+                &src.perspectives[i],
+                &net.ft_weights,
+                pd.added(),
+                pd.removed(),
+            );
+        }
+    }
+
     /// Pack the accumulator into `out`, the byte input buffer for L1, as the
     /// module head describes.
     #[cfg(all(feature = "sfnn", not(feature = "sfnn_threat")))]
