@@ -113,9 +113,17 @@ pub(super) fn reference_value_with(net: &SymNetwork, pos: &Position, fold: bool)
         }
 
         if HAS_PAIR {
+            // Under `nopairfold` the pairs are those of the board as it stands, whatever the fold.
+            let unfolded;
+            let pairs = if fold && super::super::HM_NOPAIRFOLD {
+                unfolded = tokens_present(pos, color);
+                &unfolded
+            } else {
+                &tokens
+            };
             let mut sum = [0.0f64; PAIR];
-            for (i, &a) in tokens.iter().enumerate() {
-                for &b in &tokens[i + 1..] {
+            for (i, &a) in pairs.iter().enumerate() {
+                for &b in &pairs[i + 1..] {
                     if !kept(a, b) {
                         continue;
                     }

@@ -13,7 +13,7 @@ use crate::types::NnueError;
 
 use super::body::read_body;
 use super::reader::Reader;
-use super::shape::HM;
+use super::shape::{HM, HM_NOPAIRFOLD};
 use super::{
     DIM, DUAL, FEATURE_LEN, FIELD, FIELD_AT, FIELD_LEN, HAS_FIELD, HAS_MOMENT, HAS_PAIR, HEAD,
     HIDDEN, HIDDEN2, MOMENT, MOMENT_AT, MOMENT_LEN, NOSKIP, NOSQR, ORDER, PAIR, PAIR_AT,
@@ -65,8 +65,16 @@ pub(super) fn expected_arch() -> String {
     );
     if HAS_PAIR {
         let end = PAIR_AT + PAIR;
-        input +=
-            &format!(",ClipScaled[{PAIR}](PairSum[{PAIR}](InputSlice[{PAIR}({PAIR_AT}:{end})]))");
+        // A pair table read at the tokens unfolded under hm is a word of its own, for the reason
+        // `FoldedTokens` is: this build reads the pairs one way, and the file has to have been trained so.
+        let pair_sum = if HM_NOPAIRFOLD {
+            "UnfoldedPairSum"
+        } else {
+            "PairSum"
+        };
+        input += &format!(
+            ",ClipScaled[{PAIR}]({pair_sum}[{PAIR}](InputSlice[{PAIR}({PAIR_AT}:{end})]))"
+        );
     }
     if HAS_MOMENT {
         let end = MOMENT_AT + MOMENT_LEN;
