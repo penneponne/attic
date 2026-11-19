@@ -316,7 +316,7 @@ pub(super) fn quad_totals_scalar(
     use super::reader::half_to_f32;
 
     let entry = |other: FeatureIndex, slot: usize| -> f32 {
-        let line = lines[usize::from(slot >= PAIR)];
+        let line = lines[usize::from((PAIR..ROW).contains(&slot))];
         let half = quad[pair_row(token, other) * 2 * ROW + line + slot];
         half_to_f32(half).expect("the reader found every half finite")
     };
@@ -360,12 +360,13 @@ pub(super) unsafe fn quad_totals_avx2(
     const GROUPS: usize = ROW / LANES;
     // Every block read is `pair_row(token, other)`, below `PAIR_ROWS`, and the table is that many blocks long.
     assert_eq!(quad.len(), PAIR_ROWS * 2 * ROW);
-    assert!(lines.iter().all(|&line| line <= ROW));
+    assert!(lines.iter().all(|&line| line == 0 || line == ROW));
     let base = quad.as_ptr();
     let offsets = row_offsets(token, others, 2 * ROW);
     // Where in a block each group of eight is read: the black channels from one row, the white from one.
-    let at: [usize; GROUPS] =
-        std::array::from_fn(|group| lines[usize::from(group * LANES >= PAIR)] + group * LANES);
+    let at: [usize; GROUPS] = std::array::from_fn(|group| {
+        lines[usize::from((PAIR..ROW).contains(&(group * LANES)))] + group * LANES
+    });
     let block = |row: usize| -> *const u16 {
         // SAFETY: the block starts `pair_row · 2 · ROW` in, and the whole block is in the table.
         unsafe { base.add(offsets[row] as usize) }

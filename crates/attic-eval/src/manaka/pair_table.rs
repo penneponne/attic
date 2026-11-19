@@ -36,10 +36,10 @@
 
 use crate::Aligned64;
 
-use super::PAIR;
-use super::reader::half_to_f32;
 #[cfg(feature = "sym_token")]
-use super::{HM, PAIR_ROWS};
+use super::HM;
+use super::reader::half_to_f32;
+use super::{PAIR, PAIR_ROWS};
 
 /// Entries in a row of the table: both frames' channels.
 pub(super) const ROW: usize = 2 * PAIR;
@@ -350,10 +350,12 @@ fn rounded(cells: &Cells, precision: PairPrecision) -> Option<Cells> {
 }
 
 /// Where in `buffer` a table of blocks starts so that it is on a 128-byte boundary: 0 or one row of halves in.
-#[cfg(feature = "sym_token")]
 fn block_start(buffer: &[u16]) -> usize {
     let misaligned = (buffer.as_ptr() as usize) % 128;
-    debug_assert!(misaligned.is_multiple_of(64), "an Aligned64 starts on a cache line");
+    debug_assert!(
+        misaligned.is_multiple_of(64),
+        "an Aligned64 starts on a cache line"
+    );
     (128 - misaligned) % 128 / std::mem::size_of::<u16>()
 }
 
