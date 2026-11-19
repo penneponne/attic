@@ -474,15 +474,11 @@ pub struct QSearch<'a> {
     /// search function.
     stack: Box<[SearchStackCell; STACK_LEN]>,
 
-    /// This worker's private differential-NNUE accumulator stack.
-    /// `acc_stack[acc_depth]` is always the accumulator for the position the
-    /// current node is searching: seeded once with a full refresh at the root,
-    /// then derived one child at a time from its parent on every `do_move`
-    /// (pushed) and discarded on `undo_move` (popped). A null move touches no
-    /// pieces, so the child reuses the parent slot without a push. Each Lazy-SMP
-    /// worker owns its own stack — never shared — so the six search evaluation
-    /// sites read it through [`attic_eval::evaluate_with`] instead of rebuilding
-    /// the accumulator from scratch. Preallocated so a node never allocates.
+    /// Differential NNUE accumulators on the current search path. The root is
+    /// fully refreshed, and the 2304-wide progress SFNN defers ordinary moves until
+    /// evaluation asks for the current slot. King refreshes use the board
+    /// immediately. A null move leaves every feature unchanged, so it reuses
+    /// the same slot with the side to move flipped.
     /// A fixed-size boxed array (length [`ACC_LEN`]); the constant length lets
     /// the optimizer drop the per-access bounds check.
     acc_stack: Box<[Accumulator; ACC_LEN]>,
@@ -490,6 +486,12 @@ pub struct QSearch<'a> {
     /// live top of the do/undo stack). Incremented per `do_move`, decremented per
     /// `undo_move`; `0` at every root node.
     acc_depth: usize,
+    /// Ordinary move deltas are saved until the next NNUE evaluation.
+    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    acc_pending: Box<[Option<MoveDelta>; ACC_LEN]>,
+    /// The deepest materialized accumulator on the active path.
+    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    acc_ready: usize,
     /// This worker's private finny table: one cached refreshed
     /// accumulator half per (perspective, own-king square), so a `do_move` whose
     /// own king moved diffs against that cached half instead of summing all 40
@@ -746,6 +748,10 @@ impl<'a> QSearch<'a> {
                 .map_err(|_| ())
                 .expect("ACC_LEN slots collected"),
             acc_depth: 0,
+            #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+            acc_pending: Box::new([None; ACC_LEN]),
+            #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+            acc_ready: 0,
             finny: FinnyCache::new(),
             verify_accumulator: false,
             histories,
@@ -1085,7 +1091,9 @@ impl<'a> QSearch<'a> {
     /// maintained accumulator rather than a per-node full refresh. Every
     /// evaluation site in the search routes through here.
     #[inline]
-    fn static_eval(&self, pos: &Position) -> Value {
+    fn static_eval(&mut self, pos: &Position) -> Value {
+        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        self.ensure_accumulator();
         let value = evaluate_with(self.net, self.acc(), pos);
         if self.verify_accumulator {
             assert_eq!(
@@ -1103,6 +1111,10 @@ impl<'a> QSearch<'a> {
     fn seed_accumulator(&mut self, pos: &Position) {
         let net = self.net;
         self.acc_depth = 0;
+        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        {
+            self.acc_ready = 0;
+        }
         self.acc_stack[0].refresh(net, pos);
     }
 
@@ -1121,10 +1133,26 @@ impl<'a> QSearch<'a> {
             .prefetch(pos.key_after(mv), pos.side_to_move().flip().index() as u8);
     }
 
-    /// Derive the child accumulator from the current top and advance the depth,
-    /// mirroring a `do_move`. `post_pos` is the position *after* the move, read
-    /// only to rebuild a perspective whose own king moved; that rebuild goes
-    /// through this worker's finny table.
+    /// Materialize deferred deltas along the path. Every pending move has
+    /// both feature-index lists, so deriving its accumulator does not read
+    /// the current board or update the king-refresh cache.
+    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+    fn ensure_accumulator(&mut self) {
+        while self.acc_ready < self.acc_depth {
+            let parent = self.acc_ready;
+            let child = parent + 1;
+            let delta = self.acc_pending[child]
+                .take()
+                .expect("pending accumulator delta");
+            let (parents, children) = self.acc_stack.split_at_mut(child);
+            Accumulator::derive_from_delta(&parents[parent], &mut children[0], self.net, &delta);
+            self.acc_ready = child;
+        }
+    }
+
+    /// Advance the accumulator depth after a real move. On the 2304-wide progress SFNN,
+    /// ordinary moves save their delta, and a king move fills its slot now
+    /// while the board and this worker's refresh cache can be used.
     #[inline]
     fn push_accumulator(&mut self, post_pos: &Position, delta: &MoveDelta) {
         // The child reads four correction slots in `correction_value`, after
@@ -1136,6 +1164,17 @@ impl<'a> QSearch<'a> {
         shared.correction_prefetch(post_pos.minor_piece_key(), us);
         shared.correction_prefetch(post_pos.non_pawn_key(Color::White), us);
         shared.correction_prefetch(post_pos.non_pawn_key(Color::Black), us);
+
+        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        {
+            if delta.half(Color::Black).is_some() && delta.half(Color::White).is_some() {
+                self.acc_depth += 1;
+                self.acc_pending[self.acc_depth] = Some(*delta);
+                return;
+            }
+            // A king refresh needs the board at this point in the path.
+            self.ensure_accumulator();
+        }
 
         let net = self.net;
         let d = self.acc_depth;
@@ -1149,14 +1188,21 @@ impl<'a> QSearch<'a> {
             &mut self.finny,
         );
         self.acc_depth = d + 1;
+        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        {
+            self.acc_ready = self.acc_depth;
+        }
     }
 
     /// Pop the child accumulator, mirroring an `undo_move`.
-    /// [`Self::push_accumulator`] never mutates the parent slot, so dropping
-    /// back to it restores the parent.
+    /// The parent slot or its pending delta stays on the path after popping.
     #[inline]
     fn pop_accumulator(&mut self) {
         self.acc_depth -= 1;
+        #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+        {
+            self.acc_ready = self.acc_ready.min(self.acc_depth);
+        }
     }
 
     /// `drawValueTable[rs][c]`, whose `REPETITION_DRAW` row is overwritten from
@@ -1793,6 +1839,10 @@ impl QSearch<'_> {
                     self.root_depth = root_depth;
                     // Slot 0 still holds the root refresh seeded above.
                     self.acc_depth = 0;
+                    #[cfg(feature = "sfnn_halfkahm2_2304_15_64_progress8ek")]
+                    {
+                        self.acc_ready = 0;
+                    }
                     best_value = self.search(
                         &mut work,
                         0,
