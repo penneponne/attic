@@ -234,6 +234,17 @@ pub(super) fn touch_pairs_hm(
     if PAIR == 0 || !(update[0] || update[1]) {
         return;
     }
+    // Held as halves, the table is read a block a pair, at the tokens as they are: each frame's channels from
+    // the block's first row if the frame is not folded and its second if it is.
+    if let Some(quad) = net.pair.quad() {
+        let totals = quad_totals(quad, token, others, folded);
+        for (frame, sum) in sums.iter_mut().enumerate() {
+            if update[frame] {
+                add_frame(sum, &totals, frame, sign);
+            }
+        }
+        return;
+    }
     let (cells, reflect) = match folded {
         [false, false] => (net.pair.cells(), false),
         [true, true] => (net.pair.cells(), true),
@@ -254,6 +265,136 @@ pub(super) fn touch_pairs_hm(
             add_frame(sum, &totals, frame, sign);
         }
     }
+}
+
+/// [`row_totals`] over `hm`'s blocks (`[PAIR_ROWS][2][ROW]` halves): for each of `others`, the black frame's channels
+/// from the block's row `folded[0]` and the white frame's from its row `folded[1]`, added up in the order
+/// [`touch_pairs`] gives. The halves are those [`row_totals`] reads for each frame's fold, in the same order, so the
+/// totals are its to the last bit.
+#[inline]
+pub(super) fn quad_totals(
+    quad: &[u16],
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    folded: [bool; 2],
+) -> [f32; ROW] {
+    let lines = folded.map(|folded| usize::from(folded) * ROW);
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "f16c"
+    ))]
+    {
+        // SAFETY: the `cfg` above is the build enabling AVX2 and F16C for the CPU it runs on.
+        unsafe { quad_totals_avx2(quad, token, others, lines) }
+    }
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "f16c"
+    )))]
+    {
+        quad_totals_scalar(quad, token, others, lines)
+    }
+}
+
+/// [`quad_totals`] in plain `f32`: the reference the AVX2 path is held to.
+#[cfg(any(
+    all(test, feature = "sym_hm"),
+    not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "f16c"
+    ))
+))]
+pub(super) fn quad_totals_scalar(
+    quad: &[u16],
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    lines: [usize; 2],
+) -> [f32; ROW] {
+    use super::reader::half_to_f32;
+
+    let entry = |other: FeatureIndex, slot: usize| -> f32 {
+        let line = lines[usize::from((PAIR..ROW).contains(&slot))];
+        let half = quad[pair_row(token, other) * 2 * ROW + line + slot];
+        half_to_f32(half).expect("the reader found every half finite")
+    };
+    let (mut even, mut odd) = ([0.0f32; ROW], [0.0f32; ROW]);
+    let (twos, last) = others.as_chunks::<2>();
+    for &[a, b] in twos {
+        for (slot, total) in even.iter_mut().enumerate() {
+            *total += entry(a, slot);
+        }
+        for (slot, total) in odd.iter_mut().enumerate() {
+            *total += entry(b, slot);
+        }
+    }
+    for &other in last {
+        for (slot, total) in even.iter_mut().enumerate() {
+            *total += entry(other, slot);
+        }
+    }
+    std::array::from_fn(|slot| even[slot] + odd[slot])
+}
+
+/// [`quad_totals_scalar`] eight channels to a register, as [`row_totals_avx2`] adds a row.
+///
+/// # Safety
+/// The running CPU must support AVX2 and F16C. The `cfg` that compiles this in names them, and the build is for
+/// the host CPU, so it does.
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "f16c"
+))]
+#[target_feature(enable = "avx2,f16c")]
+pub(super) unsafe fn quad_totals_avx2(
+    quad: &[u16],
+    token: FeatureIndex,
+    others: &[FeatureIndex],
+    lines: [usize; 2],
+) -> [f32; ROW] {
+    use std::arch::x86_64::*;
+
+    const GROUPS: usize = ROW / LANES;
+    // Every block read is `pair_row(token, other)`, below `PAIR_ROWS`, and the table is that many blocks long.
+    assert_eq!(quad.len(), PAIR_ROWS * 2 * ROW);
+    assert!(lines.iter().all(|&line| line == 0 || line == ROW));
+    let base = quad.as_ptr();
+    let offsets = row_offsets(token, others, 2 * ROW);
+    // Where in a block each group of eight is read: the black channels from one row, the white from one.
+    let at: [usize; GROUPS] = std::array::from_fn(|group| {
+        lines[usize::from((PAIR..ROW).contains(&(group * LANES)))] + group * LANES
+    });
+    let block = |row: usize| -> *const u16 {
+        // SAFETY: the block starts `pair_row · 2 · ROW` in, and the whole block is in the table.
+        unsafe { base.add(offsets[row] as usize) }
+    };
+    let mut even = [_mm256_setzero_ps(); GROUPS];
+    let mut odd = [_mm256_setzero_ps(); GROUPS];
+    let add_row = |totals: &mut [__m256; GROUPS], block: *const u16| {
+        for (total, &at) in totals.iter_mut().zip(&at) {
+            // SAFETY: `at + 8 <= 2 · ROW`, inside the block; the load is unaligned.
+            let eight = unsafe { _mm_loadu_si128(block.add(at).cast()) };
+            *total = _mm256_add_ps(*total, _mm256_cvtph_ps(eight));
+        }
+    };
+    let mut row = 0;
+    while row + 2 <= others.len() {
+        add_row(&mut even, block(row));
+        add_row(&mut odd, block(row + 1));
+        row += 2;
+    }
+    if row < others.len() {
+        add_row(&mut even, block(row));
+    }
+    let mut out = [0.0f32; ROW];
+    for ((chunk, e), o) in out.as_chunks_mut::<LANES>().0.iter_mut().zip(even).zip(odd) {
+        // SAFETY: `chunk` is eight `f32`s long; the store is unaligned.
+        unsafe { _mm256_storeu_ps(chunk.as_mut_ptr(), _mm256_add_ps(e, o)) };
+    }
+    out
 }
 
 /// The rows of `token` against each of `others`, both frames' channels, added up
