@@ -691,7 +691,7 @@ pub struct NetworkStack {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct GroupedWeights {
-    /// fc_0, [`by_group`](crate::simd::group_layout::by_group).
+    /// fc_0, [`fc_0_for_chain`](crate::simd::group_layout::fc_0_for_chain).
     pub(crate) fc_0: ArenaSlice<i8>,
     /// fc_1, [`by_group`](crate::simd::group_layout::by_group).
     pub(crate) fc_1: ArenaSlice<i8>,
@@ -820,13 +820,13 @@ impl NetworkStack {
 /// on the same sizes before it reads anything.
 #[cfg(any(feature = "sfnn_progress", feature = "sfnn_threat"))]
 fn fill_grouped(arena: &mut LargePageArena, layout: &NetLayout) {
-    use crate::simd::group_layout::{by_group, fc_2_packed};
+    use crate::simd::group_layout::{by_group, fc_0_for_chain, fc_2_packed};
 
     for s in &layout.stacks {
         if s.fc_0_weights.len() == FC_0_OUTPUT_DIMS * FC_0_PADDED_INPUT_DIMS {
             let row_major = arena.slice_mut(s.fc_0_weights).to_vec();
             let out = arena.slice_mut(s.grouped.fc_0_weights);
-            by_group(&row_major, FC_0_OUTPUT_DIMS, FC_0_PADDED_INPUT_DIMS, out);
+            fc_0_for_chain(&row_major, FC_0_OUTPUT_DIMS, FC_0_PADDED_INPUT_DIMS, out);
         }
         if s.fc_1_weights.len() == FC_1_OUTPUT_DIMS * FC_1_PADDED_INPUT_DIMS {
             let row_major = arena.slice_mut(s.fc_1_weights).to_vec();
