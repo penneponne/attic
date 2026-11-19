@@ -2630,7 +2630,10 @@ fn run_coordinated<W: Write + Send + 'static>(job: CoordinatorJob<W>) -> Coordin
     // `threads.start_searching()`.
     let root_moves = generate_root_moves(&pos, generate_all_legal_moves);
     if root_moves.is_empty() {
-        emit_bestmove(&writer, "resign");
+        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut output = Formatter::new(&mut *guard);
+        let _ = output.info("depth 0 multipv 1 score mate -1 nodes 0 pv resign");
+        let _ = output.bestmove("resign");
         return CoordinatedOutcome {
             histories,
             nodes: 0,
@@ -3287,6 +3290,23 @@ mod tests {
         );
         let bestmoves: Vec<&str> = out.lines().filter(|l| l.starts_with("bestmove ")).collect();
         assert_eq!(bestmoves, vec!["bestmove resign"]);
+    }
+
+    #[cfg(feature = "hce")]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn go_reports_mate_score_when_no_legal_move_exists() {
+        let out = run_with(
+            "setoption name USI_Hash value 16\nisready\n\
+             position sfen 4k4/4G4/4G4/9/9/9/9/9/4K4 w - 1\n\
+             go nodes 100000\nquit\n",
+        );
+        assert!(
+            out.contains(
+                "info depth 0 multipv 1 score mate -1 nodes 0 pv resign\nbestmove resign\n"
+            ),
+            "unexpected terminal search output: {out:?}"
+        );
     }
 
     #[test]
