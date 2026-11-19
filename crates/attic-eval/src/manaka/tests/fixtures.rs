@@ -85,7 +85,7 @@ impl Gain {
     const W2: f32 = 2.0;
     /// Eight channels sum fewer rows' worth of spread than sixteen do, so a table that narrow wants a
     /// larger gain to reach the upper rail on the opening's thirty plies.
-    const PAIR: f32 = if super::super::PAIR <= 8 { 0.2 } else { 0.1 };
+    const PAIR: f32 = if super::super::PAIR == 8 { 0.2 } else { 0.1 };
     const MOMENT: f32 = 0.2;
     const FIELD: f32 = 0.6;
 
