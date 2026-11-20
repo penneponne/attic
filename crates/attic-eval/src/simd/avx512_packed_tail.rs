@@ -91,6 +91,48 @@ pub struct Stack<'a> {
 /// The running CPU must support `avx512f`, `avx512bw` and `avx512vnni`.
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 pub unsafe fn fc_chain(transformed: &[u8; FC_0_INPUT_DIMS], stack: &Stack<'_>) -> i32 {
+    assert_stack(stack);
+
+    // SAFETY: the target_feature grant covers the callees; the lengths are
+    // asserted above.
+    unsafe {
+        let fc_0_out = if cfg!(feature = "sfnn_threat") {
+            fc_0_dense(transformed, stack.fc_0_biases, stack.fc_0_grouped)
+        } else {
+            fc_0(transformed, stack.fc_0_biases, stack.fc_0_grouped)
+        };
+        after_fc_0(&fc_0_out, stack)
+    }
+}
+
+/// [`fc_chain`] for Cyfamate's threat shape straight from the accumulator: the output
+/// transform is made in registers inside fc_0, one 64-byte input chunk at a time, as
+/// Cyfamate runs it (its fused rows), so no transformed buffer is stored and read back.
+/// `own` and `other` are the side to move's and the other side's accumulator halves.
+/// Bit for bit [`fc_chain`] on the buffer the transform would have written.
+///
+/// # Panics
+/// As [`fc_chain`], and unless both halves are `FC_0_INPUT_DIMS` long.
+///
+/// # Safety
+/// As [`fc_chain`].
+#[cfg(feature = "sfnn_threat")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+pub unsafe fn fc_chain_rows(own: &[i16], other: &[i16], stack: &Stack<'_>) -> i32 {
+    assert_stack(stack);
+    assert!(
+        own.len() == FC_0_INPUT_DIMS && other.len() == FC_0_INPUT_DIMS,
+        "an accumulator half is not the width this build's shape needs"
+    );
+    // SAFETY: as in `fc_chain`; the halves' lengths are asserted above.
+    unsafe {
+        let fc_0_out = fc_0_dense_rows([own, other], stack.fc_0_biases, stack.fc_0_grouped);
+        after_fc_0(&fc_0_out, stack)
+    }
+}
+
+/// Panics unless every slice of `stack` is the length this build's shape gives it.
+fn assert_stack(stack: &Stack<'_>) {
     assert!(
         stack.fc_0_biases.len() == FC_0_OUTPUT_DIMS
             && stack.fc_0_grouped.len() == FC_0_OUTPUT_DIMS * FC_0_PADDED_INPUT_DIMS
@@ -100,17 +142,16 @@ pub unsafe fn fc_chain(transformed: &[u8; FC_0_INPUT_DIMS], stack: &Stack<'_>) -
             && stack.fc_2_packed.len() == FC_2_OUTPUT_DIMS * FC_2_PADDED_INPUT_DIMS,
         "the stack's dense layers are not the sizes this build's shape needs"
     );
+}
 
-    // SAFETY: the target_feature grant covers the callees; the lengths are
-    // asserted above.
-    let fc_0_out = unsafe {
-        if cfg!(feature = "sfnn_threat") {
-            fc_0_dense(transformed, stack.fc_0_biases, stack.fc_0_grouped)
-        } else {
-            fc_0(transformed, stack.fc_0_biases, stack.fc_0_grouped)
-        }
-    };
-
+/// The chain after fc_0: the activations, fc_1, fc_2 and the shortcut.
+///
+/// # Safety
+/// The CPU must support `avx512f`, `avx512bw` and `avx512vnni`; `stack` must
+/// have passed [`assert_stack`].
+#[inline]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+unsafe fn after_fc_0(fc_0_out: &[i32; FC_0_OUTPUT_DIMS], stack: &Stack<'_>) -> i32 {
     // fc_1's input: [SqrClippedReLU(15) | ClippedReLU(15) | 0, 0], the 16th
     // fc_0 output being the shortcut. Fifteen lanes are below the width the
     // SIMD activations take, so these are the scalar ones, as everywhere else.
@@ -121,7 +162,8 @@ pub unsafe fn fc_chain(transformed: &[u8; FC_0_INPUT_DIMS], stack: &Stack<'_>) -
         &mut fc_1_in[HIDDEN1_DIMS..2 * HIDDEN1_DIMS],
     );
 
-    // SAFETY: as above.
+    // SAFETY: the caller's: the target features, and a stack that passed
+    // `assert_stack`.
     let fc_2_out = unsafe {
         let ac_1 = fc_1_clipped(&fc_1_in, stack.fc_1_biases, stack.fc_1_grouped);
         fc_2(ac_1, stack.fc_2_biases[0], stack.fc_2_packed)
@@ -258,6 +300,102 @@ unsafe fn fc_0_dense(
         _mm512_storeu_si512(out.as_mut_ptr().cast::<__m512i>(), sum);
         out
     }
+}
+
+/// [`fc_0_dense`] with its input made in registers from the two accumulator
+/// halves (`halves[0]` the side to move's) instead of read from a buffer.
+///
+/// Input chunk `c` is the transform of half `c / 8`'s lanes `64 * (c % 8) ..`
+/// and `512 + 64 * (c % 8) ..`: each lane clamped to `[0, 127]`, the pair's
+/// product taken as `mulhi(a << 8, b << 1)` = `(a * b) >> 7`, and the 64 words
+/// narrowed to bytes in order, which is exactly what
+/// [`ewm_one_perspective_file_scale`](super::avx512_post_ft::ewm_one_perspective_file_scale)
+/// stores there. The `vpdpbusd`s then run in the same order on the same bytes.
+///
+/// # Safety
+/// As [`fc_0_dense`], and each half must be `FC_0_INPUT_DIMS` long.
+#[cfg(feature = "sfnn_threat")]
+#[inline]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+unsafe fn fc_0_dense_rows(
+    halves: [&[i16]; 2],
+    biases: &[i32],
+    chunked: &[i8],
+) -> [i32; FC_0_OUTPUT_DIMS] {
+    use std::arch::x86_64::{_mm512_castsi256_si512, _mm512_cvtepi16_epi8, _mm512_inserti64x4};
+
+    let w_ptr = chunked.as_ptr();
+    let mut acc = [_mm512_setzero_si512(); FC_0_OUTPUT_DIMS];
+    for (p, half) in halves.into_iter().enumerate() {
+        let h = half.as_ptr();
+        for j in 0..EWM_HALF / CHUNK {
+            let c = p * (EWM_HALF / CHUNK) + j;
+            // SAFETY: `j * 64 + 64 <= EWM_HALF`, so both `ewm_32`s read inside
+            // the half; chunk `c`'s sixteen weight rows are inside `chunked`, as in
+            // `fc_0_dense`.
+            unsafe {
+                let lo = _mm512_cvtepi16_epi8(ewm_32(h.add(j * CHUNK)));
+                let hi = _mm512_cvtepi16_epi8(ewm_32(h.add(j * CHUNK + EWM_WORDS)));
+                let x = _mm512_inserti64x4::<1>(_mm512_castsi256_si512(lo), hi);
+                for (o, a) in acc.iter_mut().enumerate() {
+                    let w = _mm512_loadu_si512(
+                        w_ptr
+                            .add((c * FC_0_OUTPUT_DIMS + o) * CHUNK)
+                            .cast::<__m512i>(),
+                    );
+                    *a = _mm512_dpbusd_epi32(*a, x, w);
+                }
+            }
+        }
+    }
+    // SAFETY: as in `fc_0_dense`.
+    unsafe {
+        let sum = _mm512_add_epi32(
+            sum_lanes(&acc),
+            _mm512_loadu_si512(biases.as_ptr().cast::<__m512i>()),
+        );
+        let mut out = [0i32; FC_0_OUTPUT_DIMS];
+        _mm512_storeu_si512(out.as_mut_ptr().cast::<__m512i>(), sum);
+        out
+    }
+}
+
+/// Transformed bytes one accumulator half gives, and the distance between the
+/// two lanes each byte is the product of.
+#[cfg(feature = "sfnn_threat")]
+const EWM_HALF: usize = FC_0_INPUT_DIMS / 2;
+/// `i16` lanes in a 512-bit register.
+#[cfg(feature = "sfnn_threat")]
+const EWM_WORDS: usize = 32;
+
+/// The threat shape's transform of the 32 lane pairs at `ptr` and
+/// `ptr + EWM_HALF`, as `i16`: both clamped to `[0, 127]`, then
+/// `mulhi(a << 8, b << 1)` = `(a * b) >> 7`, the ops
+/// [`ewm_one_perspective_file_scale`](super::avx512_post_ft::ewm_one_perspective_file_scale) runs.
+///
+/// # Safety
+/// The CPU must support `avx512f` and `avx512bw`; `ptr .. ptr + 32` and
+/// `ptr + EWM_HALF .. + 32` must be readable `i16`s.
+#[cfg(feature = "sfnn_threat")]
+#[inline]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn ewm_32(ptr: *const i16) -> __m512i {
+    use std::arch::x86_64::{
+        _mm512_max_epi16, _mm512_min_epi16, _mm512_mulhi_epi16, _mm512_set1_epi16,
+        _mm512_slli_epi16,
+    };
+    let zero = _mm512_setzero_si512();
+    let cap = _mm512_set1_epi16(127);
+    // SAFETY: the caller's.
+    let (a, b) = unsafe {
+        (
+            _mm512_loadu_si512(ptr.cast::<__m512i>()),
+            _mm512_loadu_si512(ptr.add(EWM_HALF).cast::<__m512i>()),
+        )
+    };
+    let a = _mm512_max_epi16(_mm512_min_epi16(a, cap), zero);
+    let b = _mm512_max_epi16(_mm512_min_epi16(b, cap), zero);
+    _mm512_mulhi_epi16(_mm512_slli_epi16::<8>(a), _mm512_slli_epi16::<1>(b))
 }
 
 /// One register whose `i32` lane `o` is the sum of the sixteen lanes of
@@ -578,6 +716,50 @@ mod tests {
                     row.scalar(&t),
                     "round {round}, {zeros} per mille zeros"
                 );
+            }
+        }
+    }
+
+    /// An accumulator half with lanes below 0, inside `[0, 127]` and above it,
+    /// in proportions set by `spread` (the larger, the more lanes clamp).
+    #[cfg(feature = "sfnn_threat")]
+    fn random_half(rng: &mut Rng, spread: u64) -> Vec<i16> {
+        (0..FC_0_INPUT_DIMS)
+            .map(|_| (rng.next() % (2 * spread + 1)) as i64 - spread as i64 + 64)
+            .map(|v| v.clamp(i16::MIN as i64, i16::MAX as i64) as i16)
+            .collect()
+    }
+
+    /// The chain fed straight from the accumulator equals the chain on the
+    /// buffer the output transform writes, and both the scalar chain.
+    #[cfg(feature = "sfnn_threat")]
+    #[test]
+    fn the_chain_from_the_accumulator_matches_the_one_on_the_transformed_buffer() {
+        require_vnni!();
+        let mut rng = Rng(0xd1b5_4a32_d192_ed03);
+        for round in 0..64 {
+            let weights: fn(&mut Rng) -> i8 = match round % 4 {
+                0 => |r| r.next() as i8,
+                1 => |_| i8::MIN,
+                2 => |_| i8::MAX,
+                _ => |r| if r.next() & 1 == 0 { i8::MIN } else { i8::MAX },
+            };
+            let bias = [100_000i64, 10_000, 1_000_000, i32::MAX as i64][round % 4];
+            let row = random_stack(&mut rng, weights, bias);
+            let grouped = row.grouped();
+            let stack = row.stack(&grouped);
+            for spread in [0u64, 64, 200, 40_000] {
+                let own = random_half(&mut rng, spread);
+                let other = random_half(&mut rng, spread);
+                let mut t = [0u8; FC_0_INPUT_DIMS];
+                let (t_own, t_other) = t.split_at_mut(FC_0_INPUT_DIMS / 2);
+                scalar_post_ft::ewm_one_perspective_file_scale(&own, t_own);
+                scalar_post_ft::ewm_one_perspective_file_scale(&other, t_other);
+                // SAFETY: guarded by `require_vnni!`.
+                let (rows, buffer) =
+                    unsafe { (fc_chain_rows(&own, &other, &stack), fc_chain(&t, &stack)) };
+                assert_eq!(rows, buffer, "round {round}, spread {spread}");
+                assert_eq!(rows, row.scalar(&t), "round {round}, spread {spread}");
             }
         }
     }
